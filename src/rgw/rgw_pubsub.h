@@ -39,6 +39,12 @@ struct rgw_pubsub_topic_filter;
           <Value></Value>
         </FilterRule>
       </S3Tags>
+      <S3Zone>
+        <FilterRule>
+          <Name>siteA</Name>
+          <Type>exclude</Name>
+        </FilterRule>
+      </S3Zone>
     </Filter>
     <Id>notification1</Id>
     <Topic>arn:aws:sns:<region>:<account>:<topic></Topic>
@@ -76,6 +82,9 @@ bool match(const rgw_s3_key_value_filter& filter, const KeyMultiValueMap& kv);
 
 // return true if the event type matches (equal or contained in) one of the events in the list
 bool match(const rgw::notify::EventTypeList& events, rgw::notify::EventType event);
+
+// return true if the key matches the tag rules of the tag filter
+bool match(const rgw_s3_zone_filter& filter, const std::string& zone);
 
 struct rgw_pubsub_s3_notifications {
   std::list<rgw_pubsub_s3_notification> list;

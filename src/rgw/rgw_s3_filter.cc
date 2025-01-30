@@ -134,16 +134,39 @@ bool rgw_s3_key_value_filter::has_content() const {
   return !kv.empty();
 }
 
+void rgw_s3_zone_filter::dump(Formatter *f) const {
+  // TODO
+}
+
+bool rgw_s3_zone_filter::decode_xml(XMLObj* obj) {
+  // TODO
+}
+
+void rgw_s3_zone_filter::dump_xml(Formatter *f) const {
+  if (!zone.empty()) {
+    f->open_object_section("FilterRule");
+    ::encode_xml("Zone", name, f);
+    ::encode_xml("Type", include, f);
+    f->close_section();
+  }
+}
+
+bool rgw_s3_zone_filter::has_content() const {
+  return !zone.empty();
+}
+
 void rgw_s3_filter::dump(Formatter *f) const {
   encode_json("S3Key", key_filter, f);
   encode_json("S3Metadata", metadata_filter, f);
   encode_json("S3Tags", tag_filter, f);
+  encode_json("S3Zone", zone_filter, f);
 }
 
 bool rgw_s3_filter::decode_xml(XMLObj* obj) {
   RGWXMLDecoder::decode_xml("S3Key", key_filter, obj);
   RGWXMLDecoder::decode_xml("S3Metadata", metadata_filter, obj);
   RGWXMLDecoder::decode_xml("S3Tags", tag_filter, obj);
+  RGWXMLDecoder::decode_xml("S3Zone", zone_filter, obj);
   return true;
 }
 
@@ -157,12 +180,16 @@ void rgw_s3_filter::dump_xml(Formatter *f) const {
   if (tag_filter.has_content()) {
     ::encode_xml("S3Tags", tag_filter, f);
   }
+  if (zone_filter.has_content()) {
+    ::encode_xml("S3Zone", zone_filter, f);
+  }
 }
 
 bool rgw_s3_filter::has_content() const {
   return key_filter.has_content()  ||
          metadata_filter.has_content() ||
-         tag_filter.has_content();
+         tag_filter.has_content() ||
+         zone_filter.has_content();
 }
 
 bool match(const rgw_s3_key_filter& filter, const std::string& key) {
@@ -218,6 +245,11 @@ bool match(const rgw_s3_key_value_filter& filter, const KeyMultiValueMap& kv) {
   return true;
 }
 
+bool match(const rgw_s3_zone_filter& filter, const std::string& zone) {
+  // todo
+  return true;
+}
+
 bool match(const rgw_s3_filter& s3_filter, const rgw::sal::Object* obj) {
   if (obj == nullptr) {
     return false;
@@ -264,6 +296,8 @@ bool match(const rgw_s3_filter& s3_filter, const rgw::sal::Object* obj) {
       return true;
     }
   }
+
+  // TODO match zone filter
 
   return false;
 }

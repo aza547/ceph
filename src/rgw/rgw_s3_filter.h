@@ -63,10 +63,9 @@ struct rgw_s3_key_value_filter {
 };
 WRITE_CLASS_ENCODER(rgw_s3_key_value_filter)
 
-struct rgw_s3_filter {
-  rgw_s3_key_filter key_filter;
-  rgw_s3_key_value_filter metadata_filter;
-  rgw_s3_key_value_filter tag_filter;
+struct rgw_s3_zone_filter {
+  std::string zone;
+  bool include;
 
   bool has_content() const;
 
@@ -75,19 +74,51 @@ struct rgw_s3_filter {
   void dump_xml(Formatter *f) const;
 
   void encode(bufferlist& bl) const {
-    ENCODE_START(2, 1, bl);
-      encode(key_filter, bl);
-      encode(metadata_filter, bl);
-      encode(tag_filter, bl);
+    ENCODE_START(1, 1, bl);
+      encode(zone, bl);
+      encode(include, bl);
     ENCODE_FINISH(bl);
   }
 
   void decode(bufferlist::const_iterator& bl) {
-    DECODE_START(2, bl);
+    DECODE_START(1, bl);
+      decode(zone, bl);
+      decode(include, bl);
+    DECODE_FINISH(bl);
+  }
+};
+WRITE_CLASS_ENCODER(rgw_s3_key_filter)
+
+struct rgw_s3_filter {
+  rgw_s3_key_filter key_filter;
+  rgw_s3_key_value_filter metadata_filter;
+  rgw_s3_key_value_filter tag_filter;
+  rgw_s3_zone_filter zone_filter;
+
+  bool has_content() const;
+
+  void dump(Formatter *f) const;
+  bool decode_xml(XMLObj *obj);
+  void dump_xml(Formatter *f) const;
+
+  void encode(bufferlist& bl) const {
+    ENCODE_START(3, 1, bl);
+      encode(key_filter, bl);
+      encode(metadata_filter, bl);
+      encode(tag_filter, bl);
+      encode(zone_filter, bl);
+    ENCODE_FINISH(bl);
+  }
+
+  void decode(bufferlist::const_iterator& bl) {
+    DECODE_START(3, bl);
       decode(key_filter, bl);
       decode(metadata_filter, bl);
       if (struct_v >= 2) {
         decode(tag_filter, bl);
+      }
+      if (struct_v >= 3) {
+        decode(zone_filter, bl);
       }
     DECODE_FINISH(bl);
   }
