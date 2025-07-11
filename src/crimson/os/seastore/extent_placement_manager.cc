@@ -915,7 +915,7 @@ ExtentPlacementManager::BackgroundProcess::do_background_cycle()
     }
 
     if (!proceed_clean_main && !proceed_clean_cold) {
-      ceph_abort("no background process will start");
+      ceph_abort_msg("no background process will start");
     }
     return seastar::when_all(
       [this, FNAME, proceed_clean_main,
@@ -1069,8 +1069,8 @@ RandomBlockOolWriter::do_write(
       w_info.bp = bp;
       writes.push_back(w_info);
     }
-    TRACE("current extent: base off {} len {},\
-      maybe-merged current extent: base off {} len {}",
+    TRACE("current extent: {}~0x{:x},\
+      maybe-merged current extent: {}~0x{:x}",
       paddr, ex->get_length(), writes.back().offset, writes.back().bp.length());
   }
 

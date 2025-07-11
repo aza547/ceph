@@ -14,7 +14,8 @@ from .. import data_utils
 from .. import deployment_utils
 from .. import file_utils
 from ..call_wrappers import call, CallVerbosity
-from ceph.cephadm.images import DEFAULT_SAMBA_IMAGE
+from ceph.cephadm.images import DefaultImages
+from ..constants import DEFAULT_IMAGE
 from ..container_daemon_form import ContainerDaemonForm, daemon_to_container
 from ..container_engines import Podman
 from ..container_types import (
@@ -43,6 +44,7 @@ _MUTEX_SUBCMD = [_SCC, 'ctdb-rados-mutex']  # requires rados uri
 class Features(enum.Enum):
     DOMAIN = 'domain'
     CLUSTERED = 'clustered'
+    CEPHFS_PROXY = 'cephfs-proxy'
 
     @classmethod
     def valid(cls, value: str) -> bool:
@@ -68,6 +70,21 @@ class ClusterPublicIP(NamedTuple):
         return cls(address, destinations)
 
 
+class Ports(enum.Enum):
+    SMB = 445
+    SMBMETRICS = 9922
+    CTDB = 4379
+
+    def customized(self, service_ports: Dict[str, int]) -> int:
+        """Return a custom port value if it is present in service_ports or the
+        default port value if it is not present.
+        """
+        port = service_ports.get(self.name.lower())
+        if port:
+            return int(port)
+        return int(self.value)
+
+
 @dataclasses.dataclass(frozen=True)
 class Config:
     identity: DaemonIdentity
@@ -82,6 +99,7 @@ class Config:
     user_sources: List[str] = dataclasses.field(default_factory=list)
     custom_dns: List[str] = dataclasses.field(default_factory=list)
     smb_port: int = 0
+    ctdb_port: int = 0
     ceph_config_entity: str = 'client.admin'
     vhostname: str = ''
     metrics_image: str = ''
@@ -94,6 +112,7 @@ class Config:
     cluster_public_addrs: List[ClusterPublicIP] = dataclasses.field(
         default_factory=list
     )
+    proxy_image: str = ''
 
     def config_uris(self) -> List[str]:
         uris = [self.source_config]
@@ -126,7 +145,10 @@ class ContainerCommon:
         return {}
 
     def envs_list(self) -> List[str]:
-        return []
+        """Wrapper for .envs() that returns a list of `key=value` strings
+        for all env vars.
+        """
+        return [f'{k}={v}' for (k, v) in self.envs().items()]
 
     def args(self) -> List[str]:
         return []
@@ -162,9 +184,6 @@ class SambaContainerCommon(ContainerCommon):
             # samba container specific variant
             environ['NODE_NUMBER'] = environ['RANK']
         return environ
-
-    def envs_list(self) -> List[str]:
-        return [f'{k}={v}' for (k, v) in self.envs().items()]
 
     def args(self) -> List[str]:
         args = []
@@ -206,11 +225,17 @@ class SMBDContainer(SambaContainerCommon):
 
     def container_args(self) -> List[str]:
         cargs = []
-        if self.cfg.smb_port:
-            cargs.append(f'--publish={self.cfg.smb_port}:{self.cfg.smb_port}')
-        if self.cfg.metrics_port:
-            metrics_port = self.cfg.metrics_port
-            cargs.append(f'--publish={metrics_port}:{metrics_port}')
+        if not self.cfg.clustered:
+            # if we are not clustered we use container networking (vs. host
+            # networking) and need to publish ports via podman/docker.
+            # All published ports happen at the primary container.
+            if self.cfg.smb_port:
+                cargs.append(
+                    f'--publish={self.cfg.smb_port}:{Ports.SMB.value}'
+                )
+            if self.cfg.metrics_port:
+                metrics_port = self.cfg.metrics_port
+                cargs.append(f'--publish={metrics_port}:{metrics_port}')
         cargs.extend(_container_dns_args(self.cfg))
         return cargs
 
@@ -270,6 +295,23 @@ class SMBMetricsContainer(ContainerCommon):
         args = []
         if self.cfg.metrics_port > 0:
             args.append(f'--port={self.cfg.metrics_port}')
+        return args
+
+
+class CephFSProxyContainer(ContainerCommon):
+    def name(self) -> str:
+        return 'proxy'
+
+    def args(self) -> List[str]:
+        return []
+
+    def container_args(self) -> List[str]:
+        args = super().container_args()
+        # Set the working directory to something that libcephfsd can create
+        # O_TMPFILE style temporary files in (aka. not overlayfs on centos9).
+        # We already need to map in /run so reuse that (for now).
+        args.append('--workdir=/run')
+        args.append('--entrypoint=/usr/sbin/libcephfsd')
         return args
 
 
@@ -368,7 +410,7 @@ class SMB(ContainerDaemonForm):
 
     daemon_type = 'smb'
     daemon_base = '/usr/sbin/smbd'
-    default_image = DEFAULT_SAMBA_IMAGE
+    default_image = DefaultImages.SAMBA.image_ref
 
     @classmethod
     def for_daemon_type(cls, daemon_type: str) -> bool:
@@ -383,8 +425,6 @@ class SMB(ContainerDaemonForm):
         self._config_keyring = context_getters.get_config_and_keyring(ctx)
         self._cached_layout: Optional[ContainerLayout] = None
         self._rank_info = context_getters.fetch_rank_info(ctx) or (-1, -1)
-        self.smb_port = 445
-        self.metrics_port = 9922
         self._network_mapper = _NetworkMapper(ctx)
         logger.debug('Created SMB ContainerDaemonForm instance')
 
@@ -424,7 +464,8 @@ class SMB(ContainerDaemonForm):
         ceph_config_entity = configs.get('config_auth_entity', '')
         vhostname = configs.get('virtual_hostname', '')
         metrics_image = configs.get('metrics_image', '')
-        metrics_port = int(configs.get('metrics_port', '0'))
+        service_ports = configs.get('service_ports', {})
+        proxy_image = configs.get('proxy_image', '')
         cluster_meta_uri = configs.get('cluster_meta_uri', '')
         cluster_lock_uri = configs.get('cluster_lock_uri', '')
         cluster_public_addrs = configs.get('cluster_public_addrs', [])
@@ -445,6 +486,13 @@ class SMB(ContainerDaemonForm):
             # the cluster/instanced id to the system hostname
             hname = socket.getfqdn()
             vhostname = f'{instance_id}-{hname}'
+        # if the proxy is not to be deployed don't set the image
+        # if the proxy is to be deployed use the supplied image or
+        # the default ceph image
+        if Features.CEPHFS_PROXY.value not in instance_features:
+            proxy_image = ''
+        elif not proxy_image:
+            proxy_image = DEFAULT_IMAGE
         _public_addrs = [
             ClusterPublicIP.convert(v) for v in cluster_public_addrs
         ]
@@ -462,16 +510,18 @@ class SMB(ContainerDaemonForm):
             custom_dns=custom_dns,
             domain_member=Features.DOMAIN.value in instance_features,
             clustered=Features.CLUSTERED.value in instance_features,
-            smb_port=self.smb_port,
+            smb_port=Ports.SMB.customized(service_ports),
+            ctdb_port=Ports.CTDB.customized(service_ports),
             ceph_config_entity=ceph_config_entity,
             vhostname=vhostname,
             metrics_image=metrics_image,
-            metrics_port=metrics_port,
+            metrics_port=Ports.SMBMETRICS.customized(service_ports),
             rank=rank,
             rank_generation=rank_gen,
             cluster_meta_uri=cluster_meta_uri,
             cluster_lock_uri=cluster_lock_uri,
             cluster_public_addrs=_public_addrs,
+            proxy_image=proxy_image,
         )
         self._files = files
         logger.debug('SMB Instance Config: %s', self._instance_cfg)
@@ -524,6 +574,11 @@ class SMB(ContainerDaemonForm):
         metrics_port = self._cfg.metrics_port
         if metrics_image and metrics_port > 0:
             ctrs.append(SMBMetricsContainer(self._cfg, metrics_image))
+
+        if self._cfg.proxy_image:
+            ctrs.append(
+                CephFSProxyContainer(self._cfg, self._cfg.proxy_image)
+            )
 
         if self._cfg.clustered:
             init_ctrs += [
@@ -683,11 +738,15 @@ class SMB(ContainerDaemonForm):
     def customize_container_endpoints(
         self, endpoints: List[EndPoint], deployment_type: DeploymentType
     ) -> None:
-        if not any(ep.port == self.smb_port for ep in endpoints):
-            endpoints.append(EndPoint('0.0.0.0', self.smb_port))
-        if self.metrics_port > 0:
-            if not any(ep.port == self.metrics_port for ep in endpoints):
-                endpoints.append(EndPoint('0.0.0.0', self.metrics_port))
+        if not any(ep.port == self._cfg.smb_port for ep in endpoints):
+            endpoints.append(EndPoint('0.0.0.0', self._cfg.smb_port))
+        if self._cfg.clustered and not any(
+            ep.port == self._cfg.ctdb_port for ep in endpoints
+        ):
+            endpoints.append(EndPoint('0.0.0.0', self._cfg.ctdb_port))
+        if self._cfg.metrics_port > 0:
+            if not any(ep.port == self._cfg.metrics_port for ep in endpoints):
+                endpoints.append(EndPoint('0.0.0.0', self._cfg.metrics_port))
 
     def prepare_data_dir(self, data_dir: str, uid: int, gid: int) -> None:
         self.validate()
@@ -723,6 +782,8 @@ class SMB(ContainerDaemonForm):
         }
         if self._cfg.ctdb_log_level:
             stub_config['ctdb']['log_level'] = self._cfg.ctdb_log_level
+        if self._cfg.ctdb_port != Ports.CTDB.value:
+            stub_config['ctdb']['ctdb_port'] = self._cfg.ctdb_port
         with file_utils.write_new(path) as fh:
             json.dump(stub_config, fh)
 

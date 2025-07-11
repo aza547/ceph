@@ -75,6 +75,12 @@ function rgw_admin {
   echo "$mrun $1 radosgw-admin"
 }
 
+function rgw_rados {
+  [ $# -lt 1 ] && echo "rgw_rados() needs 1 param" && exit 1
+
+  echo "$mrun $1 rados"
+}
+
 function rgw {
   [ $# -lt 2 ] && echo "rgw() needs at least 2 params" && exit 1
 
@@ -103,7 +109,7 @@ function init_first_zone {
 
 # create zonegroup, zone
   x $(rgw_admin $cid) zonegroup create --rgw-zonegroup=$zg --master --default
-  x $(rgw_admin $cid) zone create --rgw-zonegroup=$zg --rgw-zone=$zone --access-key=${access_key} --secret=${secret} --endpoints=$endpoints --default
+  x $(rgw_admin $cid) zone create --rgw-zonegroup=$zg --rgw-zone=$zone --access-key=${access_key} --secret=${secret} --endpoints=$endpoints --master --default
   x $(rgw_admin $cid) user create --uid=zone.user --display-name=ZoneUser --access-key=${access_key} --secret=${secret} --system
 
   x $(rgw_admin $cid) period update --commit
@@ -128,7 +134,7 @@ function init_zone_in_existing_zg {
   x $(rgw_admin $cid) period update --commit
 }
 
-function init_first_zone_in_slave_zg {
+function init_first_zone_in_peer_zg {
   [ $# -ne 8 ] && echo "init_first_zone_in_slave_zg() needs 8 params" && exit 1
 
   cid=$1
@@ -159,6 +165,12 @@ function call_rgw_admin {
   cid=$1
   shift 1
   x $(rgw_admin $cid) "$@"
+}
+
+function call_rgw_rados {
+  cid=$1
+  shift 1
+  x $(rgw_rados $cid) "$@"
 }
 
 function get_mstart_parameters {

@@ -13,7 +13,6 @@ from mgr_module import ServiceInfoT
 from mgr_util import build_url
 from typing import Dict, List, TYPE_CHECKING, cast, Collection, Callable, NamedTuple, Optional, IO
 from cephadm.services.nfs import NFSService
-from cephadm.services.smb import SMBService
 from cephadm.services.monitoring import AlertmanagerService, NodeExporterService, PrometheusService
 import secrets
 from mgr_util import verify_tls_files
@@ -22,6 +21,8 @@ import tempfile
 from cephadm.services.ingress import IngressSpec
 from cephadm.services.cephadmservice import CephExporterService
 from cephadm.services.nvmeof import NvmeofService
+
+from ceph.deployment.service_spec import SMBSpec
 
 if TYPE_CHECKING:
     from cephadm.module import CephadmOrchestrator
@@ -37,6 +38,7 @@ def cherrypy_filter(record: logging.LogRecord) -> bool:
 
 logging.getLogger('cherrypy.error').addFilter(cherrypy_filter)
 cherrypy.log.access_log.propagate = False
+logger = logging.getLogger(__name__)
 
 
 class Route(NamedTuple):
@@ -138,7 +140,7 @@ class Root(Server):
 
     @cherrypy.expose
     def index(self) -> str:
-        return '''<!DOCTYPE html>
+        return self.mgr.get_store('service_discovery/index') or '''<!DOCTYPE html>
 <html>
 <head><title>Cephadm HTTP Endpoint</title></head>
 <body>
@@ -175,6 +177,8 @@ class Root(Server):
             return self.nfs_sd_config()
         elif service == 'smb':
             return self.smb_sd_config()
+        elif service.startswith("container"):
+            return self.container_sd_config(service)
         else:
             return []
 
@@ -226,7 +230,7 @@ class Root(Server):
                     addr = self.mgr.inventory.get_addr(dd.hostname)
                     srv_entries.append({
                         'targets': [f"{build_url(host=addr, port=spec.monitor_port).lstrip('/')}"],
-                        'labels': {'instance': dd.service_name()}
+                        'labels': {'ingress': dd.service_name(), 'instance': dd.hostname}
                     })
         return srv_entries
 
@@ -274,8 +278,29 @@ class Root(Server):
         srv_entries = []
         for dd in self.mgr.cache.get_daemons_by_type('smb'):
             assert dd.hostname is not None
+            try:
+                spec = cast(SMBSpec, self.mgr.spec_store[dd.service_name()].spec)
+            except KeyError:
+                logger.warning("no spec found for %s", dd.service_name())
+                continue
+            # TODO: needs updating once ip control/colocation is present
             addr = dd.ip if dd.ip else self.mgr.inventory.get_addr(dd.hostname)
-            port = SMBService.DEFAULT_EXPORTER_PORT
+            port = spec.metrics_exporter_port()
+            srv_entries.append({
+                'targets': [build_url(host=addr, port=port).lstrip('/')],
+                'labels': {'instance': dd.hostname}
+            })
+        return srv_entries
+
+    def container_sd_config(self, service: str) -> List[Dict[str, Collection[str]]]:
+        """Return <http_sd_config> compatible prometheus config for a container service."""
+        srv_entries = []
+        for dd in self.mgr.cache.get_daemons_by_service(service):
+            assert dd.hostname is not None
+            addr = dd.ip if dd.ip else self.mgr.inventory.get_addr(dd.hostname)
+            if not dd.ports:
+                continue
+            port = dd.ports[0]
             srv_entries.append({
                 'targets': [build_url(host=addr, port=port).lstrip('/')],
                 'labels': {'instance': dd.hostname}

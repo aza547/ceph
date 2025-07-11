@@ -10,7 +10,7 @@ from ceph_volume.systemd import systemctl
 from ceph_volume.devices.lvm.common import rollback_osd
 from ceph_volume.devices.lvm.listing import direct_report
 from .bluestore import BlueStore
-from typing import Dict, Any, Optional, List, Tuple, TYPE_CHECKING
+from typing import Dict, Any, Optional, List, TYPE_CHECKING
 
 if TYPE_CHECKING:
     import argparse
@@ -115,22 +115,11 @@ class LvmBlueStore(BlueStore):
             self.args = args
 
         try:
-            vgname, lvname = self.args.data.split('/')
-            lv = api.get_single_lv(filters={'lv_name': lvname,
-                                            'vg_name': vgname})
-        except ValueError:
-            lv = None
-
-        if api.is_ceph_device(lv):
-            logger.info("device {} is already used".format(self.args.data))
-            raise RuntimeError("skipping {}, it is already prepared".format(
-                self.args.data))
-        try:
             self.prepare()
         except Exception:
             logger.exception('lvm prepare was unable to complete')
             logger.info('will rollback OSD ID creation')
-            rollback_osd(self.args, self.osd_id)
+            rollback_osd(self.osd_id)
             raise
         terminal.success("ceph-volume lvm prepare successful for: %s" %
                          self.args.data)
@@ -142,21 +131,10 @@ class LvmBlueStore(BlueStore):
         self.pre_prepare()
 
         # 2/
-        self.wal_device_path, wal_uuid, tags = self.setup_device(
-            'wal',
-            self.args.block_wal,
-            self.tags,
-            self.args.block_wal_size,
-            self.args.block_wal_slots)
-        self.db_device_path, db_uuid, tags = self.setup_device(
-            'db',
-            self.args.block_db,
-            self.tags,
-            self.args.block_db_size,
-            self.args.block_db_slots)
-
+        self.setup_metadata_devices()
         self.tags['ceph.type'] = 'block'
-        self.block_lv.set_tags(self.tags)  # type: ignore
+        if self.block_lv is not None:
+            self.block_lv.set_tags(self.tags)
 
         # 3/ encryption-only operations
         if self.encrypted:
@@ -216,12 +194,7 @@ class LvmBlueStore(BlueStore):
 
         return '/dev/mapper/%s' % uuid
 
-    def setup_device(self,
-                     device_type: str,
-                     device_name: str,
-                     tags: Dict[str, Any],
-                     size: int,
-                     slots: int) -> Tuple[str, str, Dict[str, Any]]:
+    def setup_metadata_devices(self) -> None:
         """
         Check if ``device`` is an lv, if so, set the tags, making sure to
         update the tags with the lv_uuid and lv_path which the incoming tags
@@ -230,60 +203,78 @@ class LvmBlueStore(BlueStore):
         If the device is not a logical volume, then retrieve the partition UUID
         by querying ``blkid``
         """
-        if device_name is None:
-            return '', '', tags
-        tags['ceph.type'] = device_type
-        tags['ceph.vdo'] = api.is_vdo(device_name)
-
-        try:
-            vg_name, lv_name = device_name.split('/')
-            lv = api.get_single_lv(filters={'lv_name': lv_name,
-                                            'vg_name': vg_name})
-        except ValueError:
-            lv = None
-
-        if lv:
-            lv_uuid = lv.lv_uuid
-            path = lv.lv_path
-            tags['ceph.%s_uuid' % device_type] = lv_uuid
-            tags['ceph.%s_device' % device_type] = path
-            lv.set_tags(tags)
-        elif disk.is_partition(device_name) or disk.is_device(device_name):
-            # We got a disk or a partition, create an lv
-            lv_type = "osd-{}".format(device_type)
-            name_uuid = system.generate_uuid()
-            kwargs = {
-                'device': device_name,
-                'tags': tags,
-                'slots': slots
+        s: Dict[str, Any] = {
+            'db': {
+                'attr_map': 'db_device_path',
+                'device_name': self.args.block_db,
+                'device_size': self.args.block_db_size,
+                'device_slots': self.args.block_db_slots,
+                },
+            'wal': {
+                'attr_map': 'wal_device_path',
+                'device_name': self.args.block_wal,
+                'device_size': self.args.block_wal_size,
+                'device_slots': self.args.block_wal_slots,
+                }
             }
-            # TODO use get_block_db_size and co here to get configured size in
-            # conf file
-            if size != 0:
-                kwargs['size'] = size
-            lv = api.create_lv(
-                lv_type,
-                name_uuid,
-                **kwargs)
-            path = lv.lv_path
-            tags['ceph.{}_device'.format(device_type)] = path
-            tags['ceph.{}_uuid'.format(device_type)] = lv.lv_uuid
-            lv_uuid = lv.lv_uuid
-            lv.set_tags(tags)
-        else:
-            # otherwise assume this is a regular disk partition
-            name_uuid = self.get_ptuuid(device_name)
-            path = device_name
-            tags['ceph.%s_uuid' % device_type] = name_uuid
-            tags['ceph.%s_device' % device_type] = path
-            lv_uuid = name_uuid
-        return path, lv_uuid, tags
+        for device_type, device_args in s.items():
+            device_name: str = device_args.get('device_name', None)
+            size: int = device_args.get('device_size')
+            slots: int = device_args.get('device_slots')
+            if device_name is None:
+                continue
+            _tags: Dict[str, Any] = self.tags.copy()
+            _tags['ceph.type'] = device_type
+            _tags['ceph.vdo'] = api.is_vdo(device_name)
+
+            try:
+                vg_name, lv_name = device_name.split('/')
+                lv = api.get_single_lv(filters={'lv_name': lv_name,
+                                                'vg_name': vg_name})
+            except ValueError:
+                lv = None
+
+            if lv:
+                _tags['ceph.%s_uuid' % device_type] = lv.lv_uuid
+                _tags['ceph.%s_device' % device_type] = lv.lv_path
+                lv.set_tags(_tags)
+            elif disk.is_partition(device_name) or disk.is_device(device_name):
+                # We got a disk or a partition, create an lv
+                path = device_name
+                lv_type = "osd-{}".format(device_type)
+                name_uuid = system.generate_uuid()
+                kwargs = {
+                    'name_prefix': lv_type,
+                    'uuid': name_uuid,
+                    'vg': None,
+                    'device': device_name,
+                    'slots': slots,
+                    'extents': None,
+                    'size': None,
+                    'tags': _tags,
+                }
+                # TODO use get_block_db_size and co here to get configured size in
+                # conf file
+                if size != 0:
+                    kwargs['size'] = size
+                # We do not create LV if this is a partition
+                if not disk.is_partition(device_name):
+                    lv = api.create_lv(**kwargs)
+                if lv is not None:
+                    path, lv_uuid = lv.lv_path, lv.lv_uuid
+                    for key, value in {
+                        f"ceph.{device_type}_uuid": lv_uuid,
+                        f"ceph.{device_type}_device": path,
+                    }.items():
+                        _tags[key] = value
+                        self.tags[key] = value
+                    lv.set_tags(_tags)
+                setattr(self, f'{device_type}_device_path', path)
 
     def get_osd_device_path(self,
                             osd_lvs: List["Volume"],
                             device_type: str,
-                            dmcrypt_secret: Optional[str] =
-                            None) -> Optional[str]:
+                            dmcrypt_secret: str = '') -> Optional[str]:
         """
         ``device_type`` can be one of ``db``, ``wal`` or ``block`` so that we
         can query LVs on system and fallback to querying the uuid if that is
@@ -303,7 +294,7 @@ class LvmBlueStore(BlueStore):
             logger.debug('Found block device (%s) with encryption: %s',
                          osd_block_lv.name, is_encrypted)
             uuid_tag = 'ceph.%s_uuid' % device_type
-            device_uuid = osd_block_lv.tags.get(uuid_tag)
+            device_uuid = osd_block_lv.tags.get(uuid_tag, '')
             if not device_uuid:
                 return None
 
@@ -367,7 +358,7 @@ class LvmBlueStore(BlueStore):
         if is_encrypted:
             osd_lv_path = '/dev/mapper/%s' % osd_block_lv.__dict__['lv_uuid']
             lockbox_secret = osd_block_lv.tags['ceph.cephx_lockbox_secret']
-            self.with_tpm = bool(osd_block_lv.tags.get('ceph.with_tpm', 0))
+            self.with_tpm = osd_block_lv.tags.get('ceph.with_tpm') == '1'
             if not self.with_tpm:
                 encryption_utils.write_lockbox_keyring(osd_id,
                                                        osd_fsid,

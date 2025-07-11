@@ -1,3 +1,5 @@
+.. _radosgw-config-ref:
+
 ======================================
  Ceph Object Gateway Config Reference
 ======================================
@@ -75,13 +77,19 @@ aggressiveness of lifecycle processing:
 .. confval:: rgw_lc_max_wp_worker
 
 These values can be tuned based upon your specific workload to further increase the
-aggressiveness of lifecycle processing. For a workload with a larger number of buckets (thousands)
-you would look at increasing the :confval:`rgw_lc_max_worker` value from the default value of 3 whereas for a
-workload with a smaller number of buckets but higher number of objects (hundreds of thousands)
-per bucket you would consider decreasing :confval:`rgw_lc_max_wp_worker` from the default value of 3.
+aggressiveness of lifecycle processing. For a workload with a large number of buckets (thousands)
+you would raise the number of workers by increasing :confval:`rgw_lc_max_worker`
+from the default value of 3. Whereas for a workload with a higher number of objects per bucket
+(hundreds of thousands) you would raise the number of parallel threads
+by increasing :confval:`rgw_lc_max_wp_worker` from the default value of 3.
 
 .. note:: When looking to tune either of these specific values please validate the
    current Cluster performance and Ceph Object Gateway utilization before increasing.
+
+The lifecycle maintenance thread must also be enabled on at least one RGW
+daemon for each zone. 
+
+.. confval:: rgw_enable_lc_threads
 
 Garbage Collection Settings
 ===========================
@@ -134,6 +142,11 @@ default configuration values::
 .. note:: Modifying these values requires a restart of the RGW service.
 
 Once these values have been increased from default please monitor for performance of the cluster during Garbage Collection to verify no adverse performance issues due to the increased values.
+
+At least one RGW in each zone must have the garbage collection maintenance
+thread running:
+
+.. confval:: rgw_enable_gc_threads
 
 Multisite Settings
 ==================
@@ -259,7 +272,7 @@ SSE-S3 Settings
 
 
 QoS settings
-------------
+============
 
 .. versionadded:: Nautilus
 
@@ -341,3 +354,14 @@ retention is indefinite, and notifications are retried as frequently as possible
 .. confval:: rgw_topic_persistency_sleep_duration
 
 .. _Bucket Notifications: ../notifications
+   
+Cloud Restore settings
+======================
+
+Cloud Restore feature currently enables the restoration of objects transitioned to S3-compatible cloud services into Ceph Object Gateway (RGW). The restore requests are asynchronously processed by Restore worker thread in the background. 
+
+.. confval:: rgw_restore_max_objs
+.. confval:: rgw_restore_lock_max_time
+.. confval:: rgw_restore_processor_period
+
+These values can be tuned based upon your specific workload to further increase the aggressiveness of restore processing. 

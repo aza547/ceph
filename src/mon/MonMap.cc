@@ -9,7 +9,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 
-#ifdef WITH_SEASTAR
+#ifdef WITH_CRIMSON
 #include <seastar/core/fstream.hh>
 #include <seastar/core/reactor.hh>
 #include <seastar/net/dns.hh>
@@ -39,7 +39,7 @@ using std::vector;
 using ceph::DNSResolver;
 using ceph::Formatter;
 
-#ifdef WITH_SEASTAR
+#ifdef WITH_CRIMSON
 namespace {
   seastar::logger& logger()
   {
@@ -196,7 +196,12 @@ void MonMap::encode(ceph::buffer::list& blist, uint64_t con_features) const
   if (!HAVE_FEATURE(con_features, MONENC) ||
       !HAVE_FEATURE(con_features, SERVER_NAUTILUS)) {
     for (auto& [name, info] : mon_info) {
-      legacy_mon_addr[name] = info.public_addrs.legacy_addr();
+      // see note in mon_info_t::encode()
+      auto addr = info.public_addrs.legacy_addr();
+      if (addr == entity_addr_t()) {
+        addr = info.public_addrs.as_legacy_addr();
+      }
+      legacy_mon_addr[name] = addr;
     }
   }
 
@@ -762,7 +767,7 @@ void MonMap::check_health(health_check_map_t *checks) const
   }
 }
 
-#ifdef WITH_SEASTAR
+#ifdef WITH_CRIMSON
 
 seastar::future<> MonMap::read_monmap(const std::string& monmap)
 {
@@ -899,7 +904,7 @@ seastar::future<> MonMap::build_initial(const crimson::common::ConfigProxy& conf
   }
 }
 
-#else  // WITH_SEASTAR
+#else  // WITH_CRIMSON
 
 int MonMap::init_with_monmap(const std::string& monmap, std::ostream& errout)
 {
@@ -1025,4 +1030,4 @@ int MonMap::build_initial(CephContext *cct, bool for_mkfs, ostream& errout)
   calc_legacy_ranks();
   return 0;
 }
-#endif	// WITH_SEASTAR
+#endif	// WITH_CRIMSON

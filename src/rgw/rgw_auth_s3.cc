@@ -12,6 +12,7 @@
 #include "common/armor.h"
 #include "common/utf8.h"
 #include "common/split.h"
+#include "include/timegm.h"
 #include "rgw_rest_s3.h"
 #include "rgw_auth_s3.h"
 #include "rgw_common.h"
@@ -498,6 +499,7 @@ bool is_non_s3_op(RGWOpType op_type)
   case RGW_OP_GET_OIDC_PROVIDER:
   case RGW_OP_LIST_OIDC_PROVIDERS:
   case RGW_OP_ADD_CLIENTID_TO_OIDC_PROVIDER:
+  case RGW_OP_REMOVE_CLIENTID_FROM_OIDC_PROVIDER:
   case RGW_OP_UPDATE_OIDC_PROVIDER_THUMBPRINT:
   case RGW_OP_PUBSUB_TOPIC_CREATE:
   case RGW_OP_PUBSUB_TOPICS_LIST:
@@ -1072,7 +1074,7 @@ AWSv4ComplMulti::ChunkMeta::create_next(CephContext* const cct,
   if (data_length == 0 && data_field_end == metabuf) {
     ldout(cct, 20) << "AWSv4ComplMulti: cannot parse the data size"
                    << dendl;
-    throw rgw::io::Exception(EINVAL, std::system_category());
+    /* this case is no longer treated as an exception */
   }
 
   if (expect_chunk_signature) {
@@ -1478,9 +1480,7 @@ void AWSv4ComplMulti::modify_request_state(const DoutPrefixProvider* dpp, req_st
   const char* const decoded_length = \
     s_rw->info.env->get("HTTP_X_AMZ_DECODED_CONTENT_LENGTH");
 
-  if (!decoded_length) {
-    throw -EINVAL;
-  } else {
+  if (decoded_length) {
     /* XXXX oh my, we forget the original content length */
     s_rw->length = decoded_length;
     s_rw->content_length = parse_content_length(decoded_length);
@@ -1740,5 +1740,31 @@ std::string get_canonical_method(const DoutPrefixProvider *dpp, RGWOpType op_typ
   }
 
   return info.method;
+}
+
+void get_aws_version_and_auth_type(const req_state* s, string& aws_version, string& auth_type)
+{
+  const char* http_auth = s->info.env->get("HTTP_AUTHORIZATION");
+  if (http_auth && http_auth[0]) {
+    auth_type = "AuthHeader";
+    /* Authorization in Header */
+    if (!strncmp(http_auth, AWS4_HMAC_SHA256_STR,
+                 strlen(AWS4_HMAC_SHA256_STR))) {
+      /* AWS v4 */
+      aws_version = "SigV4";
+    } else if (!strncmp(http_auth, "AWS ", 4)) {
+      /* AWS v2 */
+      aws_version = "SigV2";
+    }
+  } else {
+    auth_type = "QueryString";
+    if (s->info.args.get("x-amz-algorithm") == AWS4_HMAC_SHA256_STR) {
+      /* AWS v4 */
+      aws_version = "SigV4";
+    } else if (!s->info.args.get("AWSAccessKeyId").empty()) {
+      /* AWS v2 */
+      aws_version = "SigV2";
+    }
+  }
 }
 } // namespace rgw::auth::s3

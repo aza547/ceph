@@ -12,7 +12,9 @@
  * 
  */
 
+#include "Monitor.h"
 
+#include <iomanip> // for std::setw()
 #include <iterator>
 #include <sstream>
 #include <tuple>
@@ -26,11 +28,11 @@
 #include "json_spirit/json_spirit_reader.h"
 #include "json_spirit/json_spirit_writer.h"
 
-#include "Monitor.h"
 #include "common/version.h"
 #include "common/blkdev.h"
 #include "common/cmdparse.h"
 #include "common/signal.h"
+#include "crush/CrushWrapper.h"
 
 #include "osd/OSDMap.h"
 
@@ -94,10 +96,17 @@
 
 #include "auth/none/AuthNoneClientHandler.h"
 
+#ifdef WITH_CRIMSON
+#include "crimson/common/perf_counters_collection.h"
+#else
+#include "common/perf_counters_collection.h"
+#endif
+
 #define dout_subsys ceph_subsys_mon
 #undef dout_prefix
 #define dout_prefix _prefix(_dout, this)
 using namespace TOPNSPC::common;
+using namespace std::literals;
 
 using std::cout;
 using std::dec;
@@ -184,7 +193,6 @@ Monitor::Monitor(CephContext* cct_, string nm, MonitorDBStore *s,
   leader(0),
   quorum_con_features(0),
   // scrub
-  scrub_version(0),
   scrub_event(NULL),
   scrub_timeout_event(NULL),
 
@@ -537,6 +545,7 @@ CompatSet Monitor::get_supported_features()
   compat.incompat.insert(CEPH_MON_FEATURE_INCOMPAT_QUINCY);
   compat.incompat.insert(CEPH_MON_FEATURE_INCOMPAT_REEF);
   compat.incompat.insert(CEPH_MON_FEATURE_INCOMPAT_SQUID);
+  compat.incompat.insert(CEPH_MON_FEATURE_INCOMPAT_TENTACLE);
   return compat;
 }
 
@@ -604,44 +613,42 @@ void Monitor::write_features(MonitorDBStore::TransactionRef t)
   t->put(MONITOR_NAME, COMPAT_SET_LOC, bl);
 }
 
-const char** Monitor::get_tracked_conf_keys() const
+std::vector<std::string> Monitor::get_tracked_keys() const noexcept
 {
-  static const char* KEYS[] = {
-    "crushtool", // helpful for testing
-    "mon_election_timeout",
-    "mon_lease",
-    "mon_lease_renew_interval_factor",
-    "mon_lease_ack_timeout_factor",
-    "mon_accept_timeout_factor",
+  return {
+    "crushtool"s, // helpful for testing
+    "mon_election_timeout"s,
+    "mon_lease"s,
+    "mon_lease_renew_interval_factor"s,
+    "mon_lease_ack_timeout_factor"s,
+    "mon_accept_timeout_factor"s,
     // clog & admin clog
-    "clog_to_monitors",
-    "clog_to_syslog",
-    "clog_to_syslog_facility",
-    "clog_to_syslog_level",
-    "clog_to_graylog",
-    "clog_to_graylog_host",
-    "clog_to_graylog_port",
-    "mon_cluster_log_to_file",
-    "host",
-    "fsid",
+    "clog_to_monitors"s,
+    "clog_to_syslog"s,
+    "clog_to_syslog_facility"s,
+    "clog_to_syslog_level"s,
+    "clog_to_graylog"s,
+    "clog_to_graylog_host"s,
+    "clog_to_graylog_port"s,
+    "mon_cluster_log_to_file"s,
+    "host"s,
+    "fsid"s,
     // periodic health to clog
-    "mon_health_to_clog",
-    "mon_health_to_clog_interval",
-    "mon_health_to_clog_tick_interval",
+    "mon_health_to_clog"s,
+    "mon_health_to_clog_interval"s,
+    "mon_health_to_clog_tick_interval"s,
     // scrub interval
-    "mon_scrub_interval",
-    "mon_allow_pool_delete",
+    "mon_scrub_interval"s,
+    "mon_allow_pool_delete"s,
     // osdmap pruning - observed, not handled.
-    "mon_osdmap_full_prune_enabled",
-    "mon_osdmap_full_prune_min",
-    "mon_osdmap_full_prune_interval",
-    "mon_osdmap_full_prune_txsize",
+    "mon_osdmap_full_prune_enabled"s,
+    "mon_osdmap_full_prune_min"s,
+    "mon_osdmap_full_prune_interval"s,
+    "mon_osdmap_full_prune_txsize"s,
     // debug options - observed, not handled
-    "mon_debug_extra_checks",
-    "mon_debug_block_osdmap_trim",
-    NULL
+    "mon_debug_extra_checks"s,
+    "mon_debug_block_osdmap_trim"s
   };
-  return KEYS;
 }
 
 void Monitor::handle_conf_change(const ConfigProxy& conf,
@@ -2289,7 +2296,7 @@ void Monitor::win_election(epoch_t epoch, const set<int>& active, uint64_t featu
     encode(m, bl);
     t->put(MONITOR_STORE_PREFIX, "last_metadata", bl);
   }
-
+  elector.process_pending_pings();
   finish_election();
   if (monmap->size() > 1 &&
       monmap->get_epoch() > 0) {
@@ -2342,7 +2349,7 @@ void Monitor::lose_election(epoch_t epoch, set<int> &q, int l,
   _finish_svc_election();
 
   logger->inc(l_mon_election_lose);
-
+  elector.process_pending_pings();
   finish_election();
 }
 
@@ -2535,6 +2542,13 @@ void Monitor::apply_monmap_to_compatset_features()
     ceph_assert(HAVE_FEATURE(quorum_con_features, SERVER_SQUID));
     new_features.incompat.insert(CEPH_MON_FEATURE_INCOMPAT_SQUID);
   }
+  if (monmap_features.contains_all(ceph::features::mon::FEATURE_TENTACLE)) {
+    ceph_assert(ceph::features::mon::get_persistent().contains_all(
+           ceph::features::mon::FEATURE_TENTACLE));
+    // this feature should only ever be set if the quorum supports it.
+    ceph_assert(HAVE_FEATURE(quorum_con_features, SERVER_TENTACLE));
+    new_features.incompat.insert(CEPH_MON_FEATURE_INCOMPAT_TENTACLE);
+  }
 
   dout(5) << __func__ << dendl;
   _apply_compatset_features(new_features);
@@ -2575,6 +2589,9 @@ void Monitor::calc_quorum_requirements()
   }
   if (features.incompat.contains(CEPH_MON_FEATURE_INCOMPAT_SQUID)) {
     required_features |= CEPH_FEATUREMASK_SERVER_SQUID;
+  }
+  if (features.incompat.contains(CEPH_MON_FEATURE_INCOMPAT_TENTACLE)) {
+    required_features |= CEPH_FEATUREMASK_SERVER_TENTACLE;
   }
 
   // monmap
@@ -3089,7 +3106,9 @@ void Monitor::get_cluster_status(stringstream &ss, Formatter *f,
   } else {
     ss << "  cluster:\n";
     ss << "    id:     " << monmap->get_fsid() << "\n";
-
+    if (is_stretch_mode()){
+      ss << "    stretch_mode: ENABLED\n";
+    }
     string health;
     healthmon()->get_health_status(false, nullptr, &health,
 				   "\n            ", "\n            ");
@@ -3107,7 +3126,8 @@ void Monitor::get_cluster_status(stringstream &ss, Formatter *f,
       const auto mon_count = monmap->mon_info.size();
       auto mnow = ceph::mono_clock::now();
       ss << "    mon: " << spacing << mon_count << " daemons, quorum "
-	 << quorum_names << " (age " << timespan_str(mnow - quorum_since) << ")";
+	 << quorum_names << " (age " << timespan_str(mnow - quorum_since) << ")"
+   << " [leader: " << get_leader_name() << "]";
       if (quorum_names.size() != mon_count) {
 	std::list<std::string> out_of_q;
 	for (size_t i = 0; i < monmap->ranks.size(); ++i) {
@@ -4024,7 +4044,7 @@ void Monitor::handle_command(MonOpRequestRef op)
 
     for (auto& p : mgrstatmon()->get_service_map().services) {
       auto &service = p.first;
-      if (ServiceMap::is_normal_ceph_entity(service)) {
+      if (ServiceMap::is_normal_ceph_entity(service) || service == "nvmeof") {
         continue;
       }
       f->open_object_section(service.c_str());
@@ -4138,10 +4158,10 @@ struct AnonConnection : public Connection {
   entity_addr_t socket_addr;
 
   int send_message(Message *m) override {
-    ceph_assert(!"send_message on anonymous connection");
+    ceph_abort_msg("send_message on anonymous connection");
   }
   void send_keepalive() override {
-    ceph_assert(!"send_keepalive on anonymous connection");
+    ceph_abort_msg("send_keepalive on anonymous connection");
   }
   void mark_down() override {
     // silently ignore
@@ -5576,14 +5596,16 @@ int Monitor::scrub_start()
   dout(10) << __func__ << dendl;
   ceph_assert(is_leader());
 
-  if (!scrub_result.empty()) {
-    clog->info() << "scrub already in progress";
-    return -EBUSY;
+  if (boost::shared_ptr<ScrubContext> local_ctx = scrub_ctx.load(); local_ctx) {
+    if (!local_ctx->scrub_result.empty()) {
+      clog->info() << "scrub already in progress";
+      return -EBUSY;
+    }
+    local_ctx->scrub_result.clear();
   }
 
   scrub_event_cancel();
-  scrub_result.clear();
-  scrub_state.reset(new ScrubState);
+  scrub_ctx.store(boost::make_shared<ScrubContext>());
 
   scrub();
   return 0;
@@ -5592,12 +5614,15 @@ int Monitor::scrub_start()
 int Monitor::scrub()
 {
   ceph_assert(is_leader());
-  ceph_assert(scrub_state);
 
   scrub_cancel_timeout();
   wait_for_paxos_write();
-  scrub_version = paxos->get_version();
 
+  boost::shared_ptr<ScrubContext> local_ctx = scrub_ctx.load();
+  if (!local_ctx)
+    return -1; // scrub aborted
+
+  local_ctx->scrub_version = paxos->get_version();
 
   // scrub all keys if we're the only monitor in the quorum
   int32_t num_keys =
@@ -5608,18 +5633,18 @@ int Monitor::scrub()
        ++p) {
     if (*p == rank)
       continue;
-    MMonScrub *r = new MMonScrub(MMonScrub::OP_SCRUB, scrub_version,
+    MMonScrub *r = new MMonScrub(MMonScrub::OP_SCRUB, local_ctx->scrub_version,
                                  num_keys);
-    r->key = scrub_state->last_key;
+    r->key = local_ctx->scrub_state.last_key;
     send_mon_message(r, *p);
   }
 
   // scrub my keys
-  bool r = _scrub(&scrub_result[rank],
-                  &scrub_state->last_key,
+  bool r = _scrub(&local_ctx->scrub_result[rank],
+                  &local_ctx->scrub_state.last_key,
                   &num_keys);
 
-  scrub_state->finished = !r;
+  local_ctx->scrub_state.finished = !r;
 
   // only after we got our scrub results do we really care whether the
   // other monitors are late on their results.  Also, this way we avoid
@@ -5628,7 +5653,7 @@ int Monitor::scrub()
   scrub_reset_timeout();
 
   if (quorum.size() == 1) {
-    ceph_assert(scrub_state->finished == true);
+    ceph_assert(local_ctx->scrub_state.finished == true);
     scrub_finish();
   }
   return 0;
@@ -5663,25 +5688,33 @@ void Monitor::handle_scrub(MonOpRequestRef op)
     {
       if (!is_leader())
 	break;
-      if (m->version != scrub_version)
+
+      boost::shared_ptr<ScrubContext> local_ctx = scrub_ctx.load();
+      if (!local_ctx)
+        break; // scrub aborted
+
+      if (m->version != local_ctx->scrub_version)
 	break;
       // reset the timeout each time we get a result
       scrub_reset_timeout();
 
       int from = m->get_source().num();
-      ceph_assert(scrub_result.count(from) == 0);
-      scrub_result[from] = m->result;
+      ceph_assert(local_ctx->scrub_result.count(from) == 0);
+      local_ctx->scrub_result[from] = m->result;
 
-      if (scrub_result.size() == quorum.size()) {
+      if (local_ctx->scrub_result.size() == quorum.size()) {
         scrub_check_results();
-        scrub_result.clear();
-        if (scrub_state->finished)
+        local_ctx->scrub_result.clear();
+        if (local_ctx->scrub_state.finished) {
+          const utime_t lat = ceph_clock_now() - local_ctx->scrub_state.start;
+          dout(10) << __func__ << " mon scrub latency: " << lat << dendl;
           scrub_finish();
-        else
+        } else {
           scrub();
+        }
       }
+      break;
     }
-    break;
   }
 }
 
@@ -5764,9 +5797,11 @@ void Monitor::scrub_check_results()
 
   // compare
   int errors = 0;
-  ScrubResult& mine = scrub_result[rank];
-  for (map<int,ScrubResult>::iterator p = scrub_result.begin();
-       p != scrub_result.end();
+
+  boost::shared_ptr<ScrubContext> local_ctx = scrub_ctx.load();
+  ScrubResult& mine = local_ctx->scrub_result[rank];
+  for (map<int,ScrubResult>::iterator p = local_ctx->scrub_result.begin();
+       p != local_ctx->scrub_result.end();
        ++p) {
     if (p->first == rank)
       continue;
@@ -5799,9 +5834,7 @@ void Monitor::scrub_reset()
 {
   dout(10) << __func__ << dendl;
   scrub_cancel_timeout();
-  scrub_version = 0;
-  scrub_result.clear();
-  scrub_state.reset();
+  scrub_ctx.store(nullptr);
 }
 
 inline void Monitor::scrub_update_interval(ceph::timespan interval)
@@ -5815,7 +5848,8 @@ inline void Monitor::scrub_update_interval(ceph::timespan interval)
 
   // if scrub already in progress, all changes will already be visible during
   // the next round.  Nothing to do.
-  if (scrub_state != NULL)
+  boost::shared_ptr<ScrubContext> local_ctx = scrub_ctx.load();
+  if (local_ctx)
     return;
 
   scrub_event_cancel();
@@ -6473,7 +6507,7 @@ int Monitor::handle_auth_request(
 	dout(1) << __func__ << " invalid mode " << (int)mode << dendl;
 	return -EACCES;
       }
-      assert(mode >= AUTH_MODE_MON && mode <= AUTH_MODE_MON_MAX);
+      ceph_assert(mode >= AUTH_MODE_MON && mode <= AUTH_MODE_MON_MAX);
       decode(entity_name, p);
       decode(con->peer_global_id, p);
     } catch (ceph::buffer::error& e) {
@@ -6605,7 +6639,7 @@ bool Monitor::ms_handle_fast_authentication(Connection *con)
       entity_name_t(con->get_peer_type(), -1),  // we don't know yet
       con->get_peer_addrs(),
       con);
-    assert(s);
+    ceph_assert(s);
     dout(10) << __func__ << " adding session " << s << " to con " << con
 	     << dendl;
     con->set_priv(s);

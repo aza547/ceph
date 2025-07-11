@@ -17,19 +17,6 @@ using boost::container::flat_set;
 using rgw::auth::Identity;
 using rgw::auth::Principal;
 
-class CctCleaner {
-  CephContext* cct;
-public:
-  CctCleaner(CephContext* _cct) : cct(_cct) {}
-  ~CctCleaner() { 
-#ifdef WITH_SEASTAR
-    delete cct; 
-#else
-    cct->put(); 
-#endif
-  }
-};
-
 class FakeIdentity : public Identity {
 public:
   FakeIdentity() = default;
@@ -42,11 +29,15 @@ public:
     return 0;
   };
 
-  bool is_admin_of(const rgw_owner& o) const override {
+  bool is_admin() const override {
     return false;
   }
 
   bool is_owner_of(const rgw_owner& uid) const override {
+    return false;
+  }
+
+  bool is_root() const override {
     return false;
   }
 
@@ -163,15 +154,11 @@ public:
   }
 };
 
-auto g_cct = new CephContext(CEPH_ENTITY_TYPE_CLIENT);
-
-CctCleaner cleaner(g_cct);
-
 tracing::Tracer tracer;
 
 inline std::unique_ptr<sal::RadosStore> make_store() {
   auto context_pool = std::make_unique<ceph::async::io_context_pool>(
-    g_cct->_conf->rgw_thread_pool_size);
+    g_ceph_context->_conf->rgw_thread_pool_size);
 
   struct StoreBundle : public sal::RadosStore {
     std::unique_ptr<ceph::async::io_context_pool> context_pool;
@@ -190,7 +177,7 @@ class TestLuaManager : public rgw::sal::StoreLuaManager {
     std::string lua_script;
     unsigned read_time = 0;
     TestLuaManager() {
-      rgw_perf_start(g_cct);
+      rgw_perf_start(g_ceph_context);
     }
     int get_script(const DoutPrefixProvider* dpp, optional_yield y, const std::string& key, std::string& script) override {
       std::this_thread::sleep_for(std::chrono::seconds(read_time));
@@ -216,7 +203,7 @@ class TestLuaManager : public rgw::sal::StoreLuaManager {
       return 0;
     }
     ~TestLuaManager() {
-      rgw_perf_stop(g_cct);
+      rgw_perf_stop(g_ceph_context);
     }
 };
 
@@ -231,9 +218,9 @@ void set_read_time(rgw::sal::LuaManager* manager, unsigned read_time) {
   auto store = make_store();                   \
   pe.lua.manager = std::make_unique<TestLuaManager>(); \
   RGWEnv e; \
-  req_state s(g_cct, pe, &e, 0);
+  req_state s(g_ceph_context, pe, &e, 0);
 
-#define INIT_TRACE tracer.init(g_cct, "test"); \
+#define INIT_TRACE tracer.init(g_ceph_context, "test"); \
                    s.trace = tracer.start_trace("test", true);
 
 TEST(TestRGWLua, EmptyScript)
@@ -896,7 +883,7 @@ class TestBackground : public rgw::lua::Background {
 public:
   TestBackground(sal::RadosStore* store, rgw::sal::LuaManager* manager) : 
     rgw::lua::Background(store, 
-        g_cct, 
+        g_ceph_context,
         manager,
         1 /* run every second */) {
     }
@@ -1609,6 +1596,50 @@ TEST(TestRGWLua, MemoryLimit)
     end
   )";
   s.cct->_conf->rgw_lua_max_memory_per_state = 1024*32;
+  rc = lua::request::execute(nullptr, nullptr, nullptr, &s, nullptr, script);
+  ASSERT_NE(rc, 0);
+}
+
+TEST(TestRGWLua, LuaRuntimeLimit)
+{
+  std::string script = "print(\"hello world\")";
+  
+  DEFINE_REQ_STATE;
+
+  // runtime should be sufficient
+  s.cct->_conf->rgw_lua_max_runtime_per_state = 1000; // 1 second runtime limit
+  int rc = lua::request::execute(nullptr, nullptr, nullptr, &s, nullptr, script);
+  ASSERT_EQ(rc, 0);
+
+  // no runtime limit
+  s.cct->_conf->rgw_lua_max_runtime_per_state = 0;
+  rc = lua::request::execute(nullptr, nullptr, nullptr, &s, nullptr, script);
+  ASSERT_EQ(rc, 0);
+  
+  // script should exceed the runtime limit
+  script = R"(
+    local t = 0
+    for i = 1, 1e8 do
+      t = t + i
+    end
+  )";
+ 
+  s.cct->_conf->rgw_lua_max_runtime_per_state = 10; // 10 milliseconds runtime limit
+  rc = lua::request::execute(nullptr, nullptr, nullptr, &s, nullptr, script);
+  ASSERT_NE(rc, 0);
+
+  s.cct->_conf->rgw_lua_max_runtime_per_state = 0; // no runtime limit
+  rc = lua::request::execute(nullptr, nullptr, nullptr, &s, nullptr, script);
+  ASSERT_EQ(rc, 0);
+
+  // script should exceed the runtime limit
+    script = R"(
+    for i = 1, 10 do
+      os.execute("sleep 1")
+    end
+  )";
+ 
+  s.cct->_conf->rgw_lua_max_runtime_per_state = 5000; // 5 seconds runtime limit
   rc = lua::request::execute(nullptr, nullptr, nullptr, &s, nullptr, script);
   ASSERT_NE(rc, 0);
 }

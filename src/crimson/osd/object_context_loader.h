@@ -2,9 +2,11 @@
 
 #include <seastar/core/future.hh>
 #include <seastar/util/defer.hh>
+#include "crimson/common/coroutine.h"
 #include "crimson/common/errorator.h"
 #include "crimson/common/log.h"
 #include "crimson/osd/object_context.h"
+#include "crimson/osd/osd_operation.h"
 #include "crimson/osd/pg_backend.h"
 #include "osd/object_state_fmt.h"
 
@@ -134,6 +136,7 @@ public:
     friend ObjectContextLoader;
 
     void set_state_obc(state_t &s, ObjectContextRef _obc) {
+      ceph_assert(s.is_empty());
       s.obc = std::move(_obc);
       s.obc->append_to(loader.obc_set_accessing);
     }
@@ -143,9 +146,7 @@ public:
       if (s.is_empty()) return;
 
       s.release_lock();
-      SUBDEBUGDPP(
-	osd, "released object {}, {}",
-	loader.dpp, s.obc->get_oid(), s.obc->obs);
+      SUBDEBUGDPP(osd, "releasing obc {}, {}", loader.dpp, *(s.obc), s.obc->obs);
       s.obc->remove_from(loader.obc_set_accessing);
       s = state_t();
     }
@@ -163,13 +164,19 @@ public:
       return *this;
     }
 
+    void lock_excl_sync() {
+      target_state.lock_excl_sync();
+    }
+
     ObjectContextRef &get_obc() {
       ceph_assert(!target_state.is_empty());
+      ceph_assert(target_state.obc->is_loaded());
       return target_state.obc;
     }
 
     ObjectContextRef &get_head_obc() {
       ceph_assert(!head_state.is_empty());
+      ceph_assert(head_state.obc->is_loaded());
       return head_state.obc;
     }
 
@@ -188,9 +195,76 @@ public:
       release();
     }
   };
-  Manager get_obc_manager(hobject_t oid, bool resolve_clone = true) {
+
+  class Orderer {
+    friend ObjectContextLoader;
+    ObjectContextRef orderer_obc;
+  public:
+    CommonOBCPipeline &obc_pp() {
+      ceph_assert(orderer_obc);
+      return orderer_obc->obc_pipeline;
+    }
+
+    ~Orderer() {
+      LOG_PREFIX(ObjectContextLoader::~Orderer);
+      SUBDEBUG(osd, "releasing obc {}", *(orderer_obc));
+    }
+  };
+
+  /**
+   * create_cached_obc_from_push_data
+   *
+   * Creates a fresh cached obc from passed oi and ssc.
+   * Overwrites any obc already in cache for this object.
+   *
+   * Note, this interface may be used to create a clone obc
+   * with a null ssc.  The capability is useful when handling
+   * a clone push on a replica -- we don't necessarily have
+   * a valid local copy of the head since the primary may not
+   * push the head first.  That obc with a null ssc may
+   * remain in the cache.  ObjectContextLoader::load_and_lock_clone
+   * will fix the ssc member if null, but users of any other
+   * access mechanism must be aware that ssc on a clone obc may be
+   * null.
+   */
+  ObjectContextRef create_cached_obc_from_push_data(
+    const object_info_t &oi,
+    SnapSetContextRef ssc) {
+    auto obc = obc_registry.get_cached_obc(oi.soid).first;
+    if (oi.soid.is_head()) {
+      ceph_assert(ssc); // head, ssc may not be null
+      obc->set_head_state(ObjectState(oi, true), SnapSetContextRef(ssc));
+    } else {
+      // clone, ssc may be null
+      obc->set_clone_state(ObjectState(oi, true));
+      obc->set_clone_ssc(SnapSetContextRef(ssc));
+    }
+    return obc;
+  }
+
+  Orderer get_obc_orderer(const hobject_t &oid) {
+    Orderer ret;
+    std::tie(ret.orderer_obc, std::ignore) =
+      obc_registry.get_cached_obc(oid.get_head());
+    return ret;
+  }
+
+  Manager get_obc_manager(const hobject_t &oid, bool resolve_clone = true) {
     Manager ret(*this, oid);
     ret.options.resolve_clone = resolve_clone;
+    return ret;
+  }
+
+  Manager get_obc_manager(ObjectContextRef obc) {
+    Manager ret = get_obc_manager(obc->obs.oi.soid, false);
+    ret.set_state_obc(ret.target_state, obc);
+    return ret;
+  }
+
+  Manager get_obc_manager(
+    Orderer &orderer, const hobject_t &oid, bool resolve_clone = true) {
+    Manager ret = get_obc_manager(oid, resolve_clone);
+    ret.set_state_obc(ret.head_state, orderer.orderer_obc);
     return ret;
   }
 
@@ -200,7 +274,7 @@ public:
   using load_and_lock_fut = load_and_lock_iertr::future<>;
 private:
   load_and_lock_fut load_and_lock_head(Manager &, RWState::State);
-  load_and_lock_fut load_and_lock_clone(Manager &, RWState::State);
+  load_and_lock_fut load_and_lock_clone(Manager &, RWState::State, bool lock_head=true);
 public:
   load_and_lock_fut load_and_lock(Manager &, RWState::State);
 
@@ -244,7 +318,7 @@ public:
     // locks on head as part of this call.
     manager.head_state.obc = head;
     manager.head_state.obc->append_to(obc_set_accessing);
-    co_await load_and_lock(manager, State);
+    co_await load_and_lock_clone(manager, State, false);
     co_await std::invoke(func, head, manager.get_obc());
   }
 
