@@ -11,7 +11,7 @@ commands; see :ref:`mgr-nfs`.  This document covers how to manage the
 cephadm services directly, which should only be necessary for unusual NFS
 configurations.
 
-Deploying NFS ganesha
+Deploying NFS Ganesha
 =====================
 
 Cephadm deploys NFS Ganesha daemon (or set of daemons).  The configuration for
@@ -22,7 +22,7 @@ To deploy a NFS Ganesha gateway, run the following command:
 
 .. prompt:: bash #
 
-    ceph orch apply nfs *<svc_id>* [--port *<port>*] [--placement ...]
+    ceph orch apply nfs <svc_id> [--port <port>] [--placement ...]
 
 For example, to deploy NFS with a service id of *foo* on the default
 port 2049 with the default placement of a single daemon:
@@ -47,11 +47,116 @@ Alternatively, an NFS service can be applied using a YAML specification.
       hosts:
         - host1
         - host2
+    networks:
+    - 1.2.3.4/24
+    ip_addrs:
+      host1: 10.0.0.100
+      host2: 10.0.0.101
     spec:
       port: 12345
+      monitoring_port: 567
+      monitoring_ip_addrs:
+        host1: 10.0.0.123
+        host2: 10.0.0.124
+      monitoring_networks:
+      - 192.168.124.0/24
+
 
 In this example, we run the server on the non-default ``port`` of
 12345 (instead of the default 2049) on ``host1`` and ``host2``.
+You can bind the NFS data port to a specific IP address using either the
+``ip_addrs`` or ``networks`` section. If ``ip_addrs`` is provided and
+the specified IP is assigned to the host, that IP will be used. If the
+IP is not present but ``networks`` is specified, an IP matching one of
+the given networks will be selected. If neither condition is met, the
+daemon will not start on that node.
+The default NFS monitoring port can be customized using the ``monitoring_port``
+parameter. Additionally, you can specify the ``monitoring_ip_addrs`` or
+``monitoring_networks`` parameters to bind the monitoring port to a specific
+IP address or network. If ``monitoring_ip_addrs`` is provided and the specified
+IP address is assigned to the host, that IP address will be used. If the IP
+address is not present and ``monitoring_networks`` is specified, an IP address
+that matches one of the specified networks will be used. If neither condition
+is met, the default binding will happen on all available network interfaces.
+
+TLS/SSL Example
+---------------
+
+Here's an example NFS service specification with TLS/SSL configuration:
+
+.. code-block:: yaml
+
+    service_type: nfs
+    service_id: mynfs
+    placement:
+      hosts:
+      - ceph-node-0
+    spec:
+      port: 12345
+      ssl: true
+      certificate_source: inline|reference|cephadm-signed
+      ssl_cert: |
+        -----BEGIN CERTIFICATE-----
+        (PEM cert contents here)
+        -----END CERTIFICATE-----
+      ssl_key: |
+        -----BEGIN PRIVATE KEY-----
+        (PEM key contents here)
+        -----END PRIVATE KEY-----
+      ssl_ca_cert:
+        -----BEGIN PRIVATE KEY-----
+        (PEM key contents here)
+        -----END PRIVATE KEY-----
+      tls_ktls: true
+      tls_debug: true
+      tls_min_version: TLSv1.3
+      tls_ciphers: AES-256
+
+This example configures an NFS service with TLS encryption enabled using
+inline certificates.
+
+TLS/SSL Parameters
+~~~~~~~~~~~~~~~~~~
+
+The following parameters can be used to configure TLS/SSL encryption for the NFS service:
+
+* ``ssl`` (boolean): Enable or disable SSL/TLS encryption. Default is ``false``.
+
+* ``certificate_source`` (string): Specifies the source of the TLS certificates.
+  Options include:
+
+  - ``cephadm-signed``: Use certificates signed by cephadm's internal CA
+  - ``inline``: Provide certificates directly in the specification using ``ssl_cert``, ``ssl_key``, and ``ssl_ca_cert`` fields
+  - ``reference``: Users can register their own certificate and key with certmgr and
+    set the ``certificate_source`` to ``reference`` in the spec.
+
+* ``ssl_cert`` (string): The SSL certificate in PEM format. Required when using
+  ``inline`` certificate source.
+
+* ``ssl_key`` (string): The SSL private key in PEM format. Required when using
+  ``inline`` certificate source.
+
+* ``ssl_ca_cert`` (string): The SSL CA certificate in PEM format. Required when
+  using ``inline`` certificate source.
+
+* ``custom_sans`` (list): List of custom Subject Alternative Names (SANs) to
+  include in the certificate.
+
+* ``tls_ktls`` (boolean): Enable kernel TLS (kTLS) for improved performance when
+  available. Default is ``false``.
+
+* ``tls_debug`` (boolean): Enable TLS debugging output. Useful for troubleshooting
+  TLS issues. Default is ``false``.
+
+* ``tls_min_version`` (string): Specify the minimum TLS version to accept.
+  Examples: TLSv1.3, TLSv1.2
+
+* ``tls_ciphers`` (string): Specify allowed cipher suites for TLS connections.
+  Example: :-CIPHER-ALL:+AES-256-GCM
+
+.. note:: When ``ssl`` is enabled, a ``certificate_source`` must be specified.
+   If using ``inline`` certificates, all three certificate fields (``ssl_cert``,
+   ``ssl_key``, ``ssl_ca_cert``) must be provided.
 
 The specification can then be applied by running the following command:
 
@@ -67,7 +172,7 @@ High-availability NFS
 Deploying an *ingress* service for an existing *nfs* service will provide:
 
 * a stable, virtual IP that can be used to access the NFS server
-* fail-over between hosts if there is a host failure
+* failover between hosts if there is a host failure
 * load distribution across multiple NFS gateways (although this is rarely necessary)
 
 Ingress for NFS can be deployed for an existing NFS service
@@ -94,14 +199,14 @@ A few notes:
     property to match against IPs in other networks; see
     :ref:`ingress-virtual-ip` for more information.
   * The *monitor_port* is used to access the haproxy load status
-    page.  The user is ``admin`` by default, but can be modified by
+    page.  The user is ``admin`` by default, but can be modified
     via an *admin* property in the spec.  If a password is not
     specified via a *password* property in the spec, the auto-generated password
     can be found with:
 
     .. prompt:: bash #
 
-	ceph config-key get mgr/cephadm/ingress.*{svc_id}*/monitor_password
+	ceph config-key get mgr/cephadm/ingress.<svc_id>/monitor_password
 
     For example:
 
@@ -117,7 +222,7 @@ NFS with virtual IP but no haproxy
 ----------------------------------
 
 Cephadm also supports deploying nfs with keepalived but not haproxy. This
-offers a virtual ip supported by keepalived that the nfs daemon can directly bind
+offers a virtual IP supported by keepalived that the nfs daemon can directly bind
 to instead of having traffic go through haproxy.
 
 In this setup, you'll either want to set up the service using the nfs module

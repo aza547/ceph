@@ -11,7 +11,9 @@
 #include "rgw_process_env.h"
 #include "rgw_zone.h"
 #include "rgw_acl.h"
+#ifdef WITH_RADOSGW_RADOS
 #include "rgw_sal_rados.h"
+#endif
 #include "rgw_lua_background.h"
 #include "rgw_perf_counters.h"
 
@@ -782,12 +784,12 @@ void create_top_metatable(lua_State* L, req_state* s, const char* op_name) {
 }
 
 int execute(
-    rgw::sal::Driver* driver,
     RGWREST* rest,
     OpsLogSink* olog,
     req_state* s, 
     RGWOp* op,
-    const std::string& script)
+    const rgw::lua::LuaCodeType& code,
+    int& script_return_code)
 {
   lua_state_guard lguard(s->cct->_conf->rgw_lua_max_memory_per_state,
                          s->cct->_conf->rgw_lua_max_runtime_per_state, s);
@@ -807,6 +809,9 @@ int execute(
   
     create_top_metatable(L, s, const_cast<char*>(op_name));  
 
+    //Make special error code available to lua scripts
+    lua_pushinteger(L, -EPERM);
+    lua_setglobal(L, "RGW_ABORT_REQUEST");
     // add the ops log action
     pushstring(L, RequestLogAction);
     lua_pushlightuserdata(L, rest);
@@ -819,12 +824,15 @@ int execute(
     if (s->penv.lua.background) {
       s->penv.lua.background->create_background_metatable(L);
     }
+    rc = rgw::lua::lua_execute(L, s, code);
 
-    // execute the lua script
-    if (luaL_dostring(L, script.c_str()) != LUA_OK) {
-      const std::string err(lua_tostring(L, -1));
-      ldpp_dout(s, 1) << "Lua ERROR: " << err << dendl;
-      rc = -1;
+    if (!rc) {
+      if (lua_isinteger(L, -1)) {
+        script_return_code = static_cast<int>(lua_tointeger(L, -1));
+        ldpp_dout(s, 20) << "Lua script executed successfully and returned code: " << script_return_code << dendl;
+      } else {
+        ldpp_dout(s, 20) << "Lua script executed, but did not return an integer. Ignoring return code." << dendl;
+      }
     }
   } catch (const std::runtime_error& e) {
     ldpp_dout(s, 1) << "Lua ERROR: " << e.what() << dendl;
@@ -835,6 +843,17 @@ int execute(
   }
 
   return rc;
+}
+
+int execute(
+    RGWREST* rest,
+    OpsLogSink* olog,
+    req_state* s, 
+    RGWOp* op,
+    const rgw::lua::LuaCodeType& code)
+{
+  int dummy_script_return_code = 0;
+  return execute(rest, olog, s, op, code, dummy_script_return_code);
 }
 
 } // namespace rgw::lua::request

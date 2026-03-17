@@ -28,6 +28,7 @@ case "$1" in
          adduser --quiet \
                  --system \
                  --disabled-password \
+                 --home /var/lib/cephadm \
                  --shell /bin/bash cephadm 2>/dev/null || true
          usermod --comment "cephadm user for mgr/cephadm" cephadm
          echo "..done"
@@ -38,6 +39,12 @@ case "$1" in
            usermod -U -e '' cephadm
        else
            usermod -U cephadm
+       fi
+
+       # Older versions may not have configured a home directory.
+       # If they don't have one configured then add it.
+       if ! test ~cephadm = "/nonexistent"; then
+           usermod --home /var/lib/cephadm -m cephadm
        fi
 
        # set up (initially empty) .ssh/authorized_keys file

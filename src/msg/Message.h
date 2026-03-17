@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -37,7 +38,7 @@
 #include "common/tracer.h"
 #include "include/ceph_assert.h" // Because intrusive_ptr clobbers our assert...
 #include "include/buffer.h"
-#include "include/types.h"
+#include "include/utime.h"
 #include "msg/Connection.h"
 #include "msg/MessageRef.h"
 #include "msg_types.h"
@@ -550,6 +551,16 @@ public:
 
   void encode(uint64_t features, int crcflags, bool skip_header_crc = false);
 };
+
+inline void intrusive_ptr_add_ref(Message* m)
+{
+  m->get();
+}
+
+inline void intrusive_ptr_release(Message* m)
+{
+  m->put();
+}
 
 extern Message *decode_message(CephContext *cct,
                                int crcflags,

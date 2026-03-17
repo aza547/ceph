@@ -24,7 +24,7 @@ Architecture
 
 D3N improves the performance of big-data jobs by speeding up repeatedly accessed dataset reads from the data lake.
 Cache servers are located in the datacenter on the access side of potential network and storage bottlenecks.
-D3Ns two-layer logical cache forms a traditional caching hierarchy :sup:`*`
+D3N's two-layer logical cache forms a traditional caching hierarchy :sup:`*`
 where caches nearer the client have the lowest access latency and overhead,
 while caches in higher levels in the hierarchy are slower (requiring multiple hops to access).
 The layer 1 cache server nearest to the client handles object requests by breaking them into blocks,
@@ -57,8 +57,8 @@ Requirements
 Limitations
 -----------
 
-- D3N will not cache objects compressed by `Rados Gateway Compression`_ (OSD level compression is supported).
-- D3N will not cache objects encrypted by `Rados Gateway Encryption`_.
+- D3N will not cache objects compressed by :ref:`RADOS Gateway Compression <radosgw-compression>` (OSD level compression is supported).
+- D3N will not cache objects encrypted by :ref:`RADOS Gateway Encryption <radosgw-encryption>`.
 - D3N will be disabled if the ``rgw_max_chunk_size`` config variable value differs from the ``rgw_obj_stripe_size`` config variable value.
 
 
@@ -108,13 +108,13 @@ to each RADOS Gateway without a balancer in order to avoid cached data duplicati
 
 Logs
 ----
-- D3N related log lines in ``radosgw.*.log`` contain the string ``d3n`` (case insensitive).
-- Low level D3N logs can be enabled by the ``debug_rgw_datacache`` subsystem (up to ``debug_rgw_datacache=30``).
+- D3N-related log lines in ``radosgw.*.log`` contain the string ``d3n`` (case insensitive).
+- Low-level D3N logs can be enabled by the ``debug_rgw_datacache`` subsystem (up to ``debug_rgw_datacache=30``).
 
 
 Config Reference
 ================
-The following D3N related settings can be added to the Ceph configuration file
+The following D3N-related settings can be added to the Ceph configuration file
 (i.e., usually ``ceph.conf``) under the ``[client.rgw.{instance-name}]`` section.
 
 .. confval:: rgw_d3n_l1_local_datacache_enabled
@@ -125,7 +125,5 @@ The following D3N related settings can be added to the Ceph configuration file
 
 .. _MOC D3N (Datacenter-scale Data Delivery Network): https://massopen.cloud/research-and-development/cloud-research/d3n/
 .. _Red Hat Research D3N Cache for Data Centers: https://research.redhat.com/blog/research_project/d3n-multilayer-cache/
-.. _Rados Gateway Compression: ../compression/
-.. _Rados Gateway Encryption: ../encryption/
 .. _RGW Data cache and CDN: ../rgw-cache/
 .. _Service Management - Mounting Files with Extra Container Arguments: ../cephadm/services/#mounting-files-with-extra-container-arguments

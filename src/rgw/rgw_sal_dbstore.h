@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 /*
  * Ceph - scalable distributed file system
@@ -164,7 +164,10 @@ protected:
                            RGWBucketEnt* ent) override;
       int check_bucket_shards(const DoutPrefixProvider *dpp,
                               uint64_t num_objs, optional_yield y) override;
-      virtual int chown(const DoutPrefixProvider *dpp, const rgw_owner& new_owner, optional_yield y) override;
+      virtual int chown(const DoutPrefixProvider* dpp,
+                        const rgw_owner& new_owner,
+                        const std::string& new_owner_name,
+                        optional_yield y) override;
       virtual int put_info(const DoutPrefixProvider *dpp, bool exclusive, ceph::real_time mtime, optional_yield y) override;
       virtual int check_empty(const DoutPrefixProvider *dpp, optional_yield y) override;
       virtual int check_quota(const DoutPrefixProvider *dpp, RGWQuota& quota, uint64_t obj_size, optional_yield y, bool check_size_only = false) override;
@@ -327,6 +330,9 @@ protected:
 
     /** Get a script named with the given key from the backing store */
     virtual int get_script(const DoutPrefixProvider* dpp, optional_yield y, const std::string& key, std::string& script) override;
+    /** Get a ref to the Lua bytecode if it exists, else the script named with the given key from the backing store */
+    virtual std::tuple<rgw::lua::LuaCodeType, int> get_script_or_bytecode(const DoutPrefixProvider* dpp, optional_yield y,
+                                                                          const std::string& key) override;
     /** Put a script named with the given key to the backing store */
     virtual int put_script(const DoutPrefixProvider* dpp, optional_yield y, const std::string& key, const std::string& script) override;
     /** Delete a script named with the given key from the backing store */
@@ -339,6 +345,7 @@ protected:
     virtual int list_packages(const DoutPrefixProvider* dpp, optional_yield y, rgw::lua::packages_t& packages) override;
     /** Reload lua packages */
     virtual int reload_packages(const DoutPrefixProvider* dpp, optional_yield y) override;
+
   };
 
   /*
@@ -458,7 +465,9 @@ protected:
 		       std::string& tag, ACLOwner& owner,
 		       uint64_t olh_epoch,
 		       rgw::sal::Object* target_obj,
-		       prefix_map_t& processed_prefixes) override;
+		       prefix_map_t& processed_prefixes,
+           const char *if_match = nullptr,
+           const char *if_nomatch = nullptr) override;
   virtual int cleanup_orphaned_parts(const DoutPrefixProvider *dpp,
                                      CephContext *cct, optional_yield y,
                                      const rgw_obj& obj,
@@ -554,6 +563,7 @@ protected:
           boost::optional<ceph::real_time> delete_at,
           std::string* version_id, std::string* tag, std::string* etag,
           void (*progress_cb)(off_t, void *), void* progress_data,
+          rgw::sal::DataProcessorFactory* dp_factory,
           const DoutPrefixProvider* dpp, optional_yield y) override;
       virtual RGWAccessControlPolicy& get_acl(void) override { return acls; }
       virtual int set_acl(const RGWAccessControlPolicy& acl) override { acls = acl; return 0; }
@@ -563,13 +573,13 @@ protected:
       /** If multipart, enumerate (a range [marker..marker+[min(max_parts, parts_count-1)] of) parts of the object */
       virtual int list_parts(const DoutPrefixProvider* dpp, CephContext* cct,
 			   int max_parts, int marker, int* next_marker,
-			   bool* truncated, list_parts_each_t each_func,
+			   bool* truncated, list_parts_each_t&& each_func,
 			   optional_yield y) override;
 
       bool is_sync_completed(const DoutPrefixProvider* dpp, optional_yield y,
                              const ceph::real_time& obj_mtime) override;
       virtual int load_obj_state(const DoutPrefixProvider* dpp, optional_yield y, bool follow_olh = true) override;
-      virtual int get_obj_attrs(optional_yield y, const DoutPrefixProvider* dpp, rgw_obj* target_obj = NULL) override;
+      virtual int get_obj_attrs(optional_yield y, const DoutPrefixProvider* dpp) override;
       virtual int modify_obj_attrs(const char* attr_name, bufferlist& attr_val, optional_yield y, const DoutPrefixProvider* dpp,
 	                           uint32_t flags = rgw::sal::FLAG_LOG_OP) override;
       virtual int delete_obj_attrs(const DoutPrefixProvider* dpp, const char* attr_name, optional_yield y) override;

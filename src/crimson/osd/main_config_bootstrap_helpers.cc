@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "crimson/osd/main_config_bootstrap_helpers.h"
 
@@ -96,7 +96,8 @@ const std::vector<SeastarOption> seastar_options = {
   {"--task-quota-ms", "crimson_reactor_task_quota_ms", Option::TYPE_FLOAT},
   {"--io-latency-goal-ms", "crimson_reactor_io_latency_goal_ms", Option::TYPE_FLOAT},
   {"--idle-poll-time-us", "crimson_reactor_idle_poll_time_us", Option::TYPE_UINT},
-  {"--poll-mode", "crimson_poll_mode", Option::TYPE_BOOL}
+  {"--poll-mode", "crimson_poll_mode", Option::TYPE_BOOL},
+  {"--reactor-backend", "crimson_reactor_backend", Option::TYPE_STR}
 };
 
 // Function to get the option value as a string
@@ -117,6 +118,13 @@ std::optional<std::string> get_option_value(const SeastarOption& option) {
     case Option::TYPE_BOOL: {
      if (crimson::common::get_conf<bool>(option.config_key)) {
         return "true";
+      }
+      break;
+    }
+    case Option::TYPE_STR: {
+      auto value = crimson::common::get_conf<std::string>(option.config_key);
+      if (!value.empty()) {
+        return value;
       }
       break;
     }
@@ -201,9 +209,9 @@ _get_early_config(int argc, const char *argv[])
 	      std::end(early_args),
 	      [](auto* arg) { return "--cpuset"sv == arg; });
 	    found == std::end(early_args)) {
-	  auto cpu_cores = crimson::common::get_conf<std::string>("crimson_seastar_cpu_cores");
+	  auto cpu_cores = crimson::common::get_conf<std::string>("crimson_cpu_set");
 	  if (!cpu_cores.empty()) {
-	    // Set --cpuset based on crimson_seastar_cpu_cores config option
+	    // Set --cpuset based on crimson_cpu_set config option
 	    // --smp default is one per CPU
 	    ret.early_args.emplace_back("--cpuset");
 	    ret.early_args.emplace_back(cpu_cores);
@@ -212,11 +220,11 @@ _get_early_config(int argc, const char *argv[])
 	    logger().info("get_early_config: set --thread-affinity 1 --cpuset {}",
 	                  cpu_cores);
 	  } else {
-	    auto reactor_num = crimson::common::get_conf<uint64_t>("crimson_seastar_num_threads");
+	    auto reactor_num = crimson::common::get_conf<uint64_t>("crimson_cpu_num");
 	    if (!reactor_num) {
-	      logger().error("get_early_config: crimson_seastar_cpu_cores"
-                             " or crimson_seastar_num_threads"
-                             " must be set");
+	      // We would like to avoid seastar using all available cores.
+	      logger().error("get_early_config: crimson_cpu_set"
+	                     " or crimson_cpu_num must be set");
 	      ceph_abort();
 	    }
 	    std::string smp = fmt::format("{}", reactor_num);
@@ -230,7 +238,7 @@ _get_early_config(int argc, const char *argv[])
 	  }
 	} else {
 	  logger().error("get_early_config: --cpuset can be "
-	                 "set only using crimson_seastar_cpu_cores");
+	                 "set only using crimson_cpu_set");
 	  ceph_abort();
 	}
 	return 0;

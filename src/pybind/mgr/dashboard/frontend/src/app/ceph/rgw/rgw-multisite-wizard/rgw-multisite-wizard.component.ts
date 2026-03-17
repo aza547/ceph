@@ -37,6 +37,11 @@ interface DaemonStats {
   };
 }
 
+interface RealmsInfo {
+  default_info: string;
+  realms: string[];
+}
+
 interface EndpointInfo {
   hostname: string;
   port: number;
@@ -56,7 +61,8 @@ enum ConfigType {
 @Component({
   selector: 'cd-rgw-multisite-wizard',
   templateUrl: './rgw-multisite-wizard.component.html',
-  styleUrls: ['./rgw-multisite-wizard.component.scss']
+  styleUrls: ['./rgw-multisite-wizard.component.scss'],
+  standalone: false
 })
 export class RgwMultisiteWizardComponent extends BaseModal implements OnInit {
   multisiteSetupForm: CdFormGroup;
@@ -153,8 +159,8 @@ export class RgwMultisiteWizardComponent extends BaseModal implements OnInit {
       this.stepsToSkip[step.label] = false;
     });
 
-    this.rgwRealmService.list().subscribe((realms: string[]) => {
-      this.realmList = realms;
+    this.rgwRealmService.list().subscribe((realmsInfo: RealmsInfo) => {
+      this.realmList = realmsInfo?.realms || [];
       this.showConfigType = this.realmList.length > 0;
       if (this.showConfigType) {
         this.multisiteSetupForm.get('selectedRealm')?.setValue(this.realmList[0]);
@@ -217,6 +223,7 @@ export class RgwMultisiteWizardComponent extends BaseModal implements OnInit {
       zoneName: new UntypedFormControl('default_zone', {
         validators: [Validators.required]
       }),
+      archive_zone: new UntypedFormControl(false, {}),
       zone_endpoints: new UntypedFormControl(null, {
         validators: [Validators.required]
       }),
@@ -290,7 +297,7 @@ export class RgwMultisiteWizardComponent extends BaseModal implements OnInit {
       const zoneName = values['zoneName'];
       const zoneEndpoints = this.rgwEndpoints.value.join(',');
       const username = values['username'];
-
+      const tierType = values['archive_zone'] ? 'archive' : '';
       if (!this.isMultiClusterConfigured || this.stepsToSkip['Select Cluster']) {
         this.rgwMultisiteService
           .setUpMultisiteReplication(
@@ -298,6 +305,7 @@ export class RgwMultisiteWizardComponent extends BaseModal implements OnInit {
             zonegroupName,
             zonegroupEndpoints,
             zoneName,
+            tierType,
             zoneEndpoints,
             username
           )
@@ -323,6 +331,7 @@ export class RgwMultisiteWizardComponent extends BaseModal implements OnInit {
             zonegroupName,
             zonegroupEndpoints,
             zoneName,
+            tierType,
             zoneEndpoints,
             username,
             cluster,

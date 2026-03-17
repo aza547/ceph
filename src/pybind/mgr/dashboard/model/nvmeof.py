@@ -1,5 +1,5 @@
-from enum import Flag, auto
-from typing import Annotated, List, NamedTuple, Optional
+from enum import Enum, Flag, auto
+from typing import Annotated, Any, Callable, List, NamedTuple, Optional
 
 
 class CliFlags(Flag):
@@ -7,6 +7,7 @@ class CliFlags(Flag):
     EXCLUSIVE_LIST = auto()
     EXCLUSIVE_RESULT = auto()
     SIZE = auto()
+    PROMOTE_INTERNAL_FIELDS = auto()
 
 
 class CliHeader:
@@ -14,23 +15,34 @@ class CliHeader:
         self.label = label
 
 
+class CliFieldTransformer:
+    def __init__(self, func: Callable) -> None:
+        if not callable(func):
+            raise TypeError("func must be callable")
+        self.func = func
+
+    def transform(self, data: Any) -> Any:
+        return self.func(data)
+
+
 class GatewayInfo(NamedTuple):
-    bool_status: bool
+    bool_status: Annotated[bool, CliFlags.DROP]
     status: int
     error_message: str
     hostname: str
-    cli_version: Annotated[str, CliFlags.DROP]
     version: str
     name: str
     group: str
     addr: str
     port: int
     load_balancing_group: Annotated[int, CliHeader('LB Group')]
-    max_hosts: int
-    max_hosts_per_subsystem: int
-    max_namespaces: int
-    max_namespaces_per_subsystem: int
-    max_subsystems: int
+    max_hosts: Annotated[int, CliFlags.DROP]
+    max_hosts_per_subsystem: Annotated[int, CliFlags.DROP]
+    max_namespaces: Annotated[int, CliFlags.DROP]
+    max_namespaces_per_subsystem: Annotated[int, CliFlags.DROP]
+    max_subsystems: Annotated[int, CliFlags.DROP]
+    gateway_initialization_over: Annotated[bool, CliFlags.DROP]
+    io_stats_enabled: Annotated[bool, CliFlags.DROP]
     spdk_version: Optional[str] = ""
 
 
@@ -87,6 +99,7 @@ class SubsystemStatus(NamedTuple):
 
 
 class Connection(NamedTuple):
+    nqn: str
     traddr: str
     trsvcid: int
     trtype: str
@@ -96,6 +109,7 @@ class Connection(NamedTuple):
     controller_id: int
     use_psk: Optional[bool]
     use_dhchap: Optional[bool]
+    dhchap_controller_origin: Optional[str]
     subsystem: Optional[str]
     disconnected_due_to_keepalive_timeout: Optional[bool]
 
@@ -107,6 +121,35 @@ class ConnectionList(NamedTuple):
     connections: Annotated[List[Connection], CliFlags.EXCLUSIVE_LIST]
 
 
+class LatencyStats(NamedTuple):
+    min: int
+    max: int
+    mean: int
+
+
+class LatencyGroup(NamedTuple):
+    io_count: int
+    total: LatencyStats
+    bdev: LatencyStats
+    net: LatencyStats
+    qos: LatencyStats
+
+
+class BucketInfo(NamedTuple):
+    size: int
+    read: LatencyGroup
+    write: LatencyGroup
+
+
+class ConnectionIOStatistics(NamedTuple):
+    status: int
+    error_message: str
+    subsystem_nqn: str
+    host_nqn: str
+    total_num_ios: int
+    buckets: Annotated[List[BucketInfo], CliFlags.EXCLUSIVE_LIST]
+
+
 class NamespaceCreation(NamedTuple):
     status: Annotated[int, CliFlags.EXCLUSIVE_RESULT]
     error_message: str
@@ -116,6 +159,7 @@ class NamespaceCreation(NamedTuple):
 class Namespace(NamedTuple):
     bdev_name: str
     rbd_image_name: Annotated[str, CliHeader("RBD Image")]
+    rados_namespace_name: Annotated[Optional[str], CliHeader("RADOS Namespace")]
     rbd_pool_name: Annotated[str, CliHeader("RBD Pool")]
     load_balancing_group: Annotated[int, CliHeader('LB Group')]
     rbd_image_size: Annotated[int, CliFlags.SIZE]
@@ -132,6 +176,7 @@ class Namespace(NamedTuple):
     trash_image: Optional[bool]
     disable_auto_resize: Optional[bool]
     read_only: Optional[bool]
+    location: Optional[str]
 
 
 class NamespaceList(NamedTuple):
@@ -171,12 +216,14 @@ class NamespaceIOStats(NamedTuple):
 
 
 class Listener(NamedTuple):
-    host_name: str
-    trtype: str
-    traddr: str
-    secure: bool
-    adrfam: int = 0  # 0: IPv4, 1: IPv6
-    trsvcid: int = 4420
+    host_name: Annotated[str, CliHeader("Host")]
+    trtype: Annotated[str, CliHeader("Transport")]
+    adrfam: Annotated[int, CliHeader("Address Family")]  # 0: IPv4, 1: IPv6
+    traddr: Annotated[str, CliHeader("Address")]
+    trsvcid: Annotated[int, CliHeader("Port")]
+    secure: Optional[bool]
+    active: Optional[bool]
+    manual: Optional[bool]
 
 
 class ListenerList(NamedTuple):
@@ -189,7 +236,8 @@ class Host(NamedTuple):
     nqn: str
     use_psk: Optional[bool]
     use_dhchap: Optional[bool]
-    disconnected_due_to_keepalive_timeout: Optional[bool]
+    dhchap_controller_origin: Optional[str]
+    disconnected_due_to_keepalive_timeout: Annotated[Optional[bool], CliFlags.DROP]
 
 
 class HostsInfo(NamedTuple):
@@ -197,9 +245,101 @@ class HostsInfo(NamedTuple):
     error_message: str
     allow_any_host: bool
     subsystem_nqn: str
-    hosts: List[Host]
+    hosts: Annotated[List[Host], CliFlags.EXCLUSIVE_LIST]
+
+
+class PollGroupTransportInfo(NamedTuple):
+    trtype: str
+
+
+class PollGroupInfo(NamedTuple):
+    name: Annotated[str, CliHeader('Poll Group')]
+    admin_qpairs: int
+    io_qpairs: int
+    current_admin_qpairs: int
+    current_io_qpairs: int
+    pending_bdev_io: int
+    completed_nvme_io: int
+    transports: List[PollGroupTransportInfo]
+
+
+class GatewayStatsInfo(NamedTuple):
+    status: int
+    error_message: str
+    tick_rate: int
+    poll_groups: Annotated[List[PollGroupInfo], CliFlags.EXCLUSIVE_LIST]
+
+
+class AnaState(Enum):
+    UNSET = 0
+    OPTIMIZED = 1
+    NON_OPTIMIZED = 2
+    INACCESSIBLE = 3
+
+
+class AnaGroupState(NamedTuple):
+    grp_id: int
+    state: List[AnaState]
+
+
+def transform_lb_states(lb_states):
+    filtered = [f"{lb['grp_id']}:{lb['state']}" for lb in lb_states if lb["state"] == "OPTIMIZED"]
+    first_lb = filtered[0] if filtered else None
+    return first_lb
+
+
+class GatewayListenerInfo(NamedTuple):
+    listener: Annotated[Listener, CliFlags.PROMOTE_INTERNAL_FIELDS]
+    lb_states: Annotated[List[AnaGroupState], CliHeader("Load Balancing Group ID/State"),
+                         CliFieldTransformer(transform_lb_states)]
+
+
+class GatewayListenersInfo(NamedTuple):
+    status: int
+    error_message: str
+    gw_listeners: Annotated[List[GatewayListenerInfo], CliFlags.EXCLUSIVE_LIST]
 
 
 class RequestStatus(NamedTuple):
     status: Annotated[int, CliFlags.EXCLUSIVE_RESULT]
     error_message: str
+
+
+class ListenAdress(NamedTuple):
+    trtype: str
+    adrfam: str
+    traddr: str
+    trsvcid: str
+    transport: Optional[str]
+    secure: Optional[bool]
+
+
+class NamespaceInfo(NamedTuple):
+    nsid: int
+    name: str
+    bdev_name: Optional[str]
+    nguid: Optional[str]
+    uuid: Optional[str]
+    anagrpid: Optional[int]
+    nonce: Optional[str]
+    auto_visible: Optional[bool]
+    hosts: List[Host]
+
+
+class SubsystemInfo(NamedTuple):
+    nqn: str
+    subtype: str
+    listen_addresses: List[ListenAdress]
+    hosts: List[Host]
+    allow_any_host: bool
+    serial_number: Optional[str]
+    model_number: Optional[str]
+    max_namespaces: Optional[int]
+    min_cntlid: Optional[int]
+    max_cntlid: Optional[int]
+    namespaces: List[Namespace]
+    has_dhchap_key: Optional[bool]
+
+
+class GetSubsystems(NamedTuple):
+    subsystems: List[Subsystem]

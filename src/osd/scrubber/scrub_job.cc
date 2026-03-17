@@ -1,11 +1,13 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "./scrub_job.h"
 
-#include "pg_scrubber.h"
-
 #include "common/debug.h"
+
+#include "common/Formatter.h"
+
+#include "pg_scrubber.h"
 
 using must_scrub_t = Scrub::must_scrub_t;
 using sched_params_t = Scrub::sched_params_t;
@@ -16,6 +18,20 @@ using ScrubJob = Scrub::ScrubJob;
 using namespace std::chrono;
 
 using SchedEntry = Scrub::SchedEntry;
+
+// ////////////////////////////////////////////////////////////////////////// //
+// SchedEntry
+
+void SchedEntry::dump(ceph::Formatter& f) const
+{
+  f.dump_named_fmt("pgid", "{}", pgid);
+  f.dump_string("level", level == scrub_level_t::shallow ? "shallow" : "deep");
+  f.dump_named_fmt("urgency", "{}", urgency);
+  f.dump_named_fmt("sched_time", "{}", schedule.not_before);
+  f.dump_named_fmt("orig_sched_time", "{}", schedule.scheduled_at);
+  f.dump_named_fmt("last_issue", "{}", last_issue);
+  f.dump_bool("forced", urgency >= urgency_t::operator_requested);
+}
 
 // ////////////////////////////////////////////////////////////////////////// //
 // SchedTarget
@@ -350,17 +366,6 @@ std::ostream& ScrubJob::gen_prefix(std::ostream& out, std::string_view fn) const
   return out << log_msg_prefix << fn << ": ";
 }
 
-void ScrubJob::dump(ceph::Formatter* f) const
-{
-  const auto& entry = earliest_target().sched_info;
-  const auto& sch = entry.schedule;
-  Formatter::ObjectSection scrubjob_section{*f, "scrub"sv};
-  f->dump_stream("pgid") << pgid;
-  f->dump_stream("sched_time") << get_sched_time();
-  f->dump_stream("orig_sched_time") << sch.scheduled_at;
-  f->dump_bool("forced", entry.urgency >= urgency_t::operator_requested);
-}
-
 // a set of static functions to determine, given a scheduling target's urgency,
 // what restrictions apply to that target (and what exemptions it has).
 
@@ -423,5 +428,11 @@ bool ScrubJob::is_autorepair_allowed(urgency_t urgency)
 {
   // note: 'after-repair' scrubs are not allowed to auto-repair
   return urgency == urgency_t::periodic_regular ||
+	 urgency == urgency_t::operator_requested ||
 	 urgency == urgency_t::repairing || urgency == urgency_t::must_repair;
+}
+
+bool ScrubJob::is_repairs_count_limited(urgency_t urgency)
+{
+  return urgency < urgency_t::operator_requested;
 }

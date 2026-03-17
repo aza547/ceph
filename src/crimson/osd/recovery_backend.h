@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -36,10 +36,11 @@ public:
   RecoveryBackend(crimson::osd::PG& pg,
 		  crimson::osd::ShardServices& shard_services,
 		  crimson::os::CollectionRef coll,
+      store_index_t store_index,
 		  PGBackend* backend)
     : pg{pg},
       shard_services{shard_services},
-      store{&shard_services.get_store()},
+      store(shard_services.get_store(store_index)),
       coll{coll},
       backend{backend} {}
   virtual ~RecoveryBackend() {}
@@ -127,7 +128,7 @@ public:
 protected:
   crimson::osd::PG& pg;
   crimson::osd::ShardServices& shard_services;
-  crimson::os::FuturizedStore::Shard* store;
+  crimson::os::BackendStore store;
   crimson::os::CollectionRef coll;
   PGBackend* backend;
 

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -16,6 +17,10 @@
 
 #include <stdlib.h>
 #include <sstream>
+#include <fstream>
+#include <string>
+#include <iterator>
+
 
 #include "ceph_ver.h"
 #include "common/ceph_strings.h"
@@ -43,6 +48,29 @@ const char *git_version_to_str(void)
   return STRINGIFY(CEPH_GIT_VER);
 }
 
+static std::string read_vendor_release_file()
+{
+  auto filename = "/etc/ceph_version";
+  std::ifstream file(filename);
+
+  if(!file.is_open()){
+    return "";
+  }
+
+  std::string content;
+  try {
+    content.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+  } catch (const std::exception &e) {
+    return "";
+  }
+  if (!content.empty()) {
+    return std::string(" release ") + content;
+  }
+
+  return "";
+
+}
+
 std::string const pretty_version_to_str(void)
 {
   std::ostringstream oss;
@@ -54,6 +82,7 @@ std::string const pretty_version_to_str(void)
 #ifdef WITH_CRIMSON
       << " (crimson)"
 #endif
+      << read_vendor_release_file()
       ;
   return oss.str();
 }

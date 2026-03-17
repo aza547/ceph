@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -102,34 +103,29 @@ TEST(pg_pool_t, encodeDecode)
                           CEPH_FEATUREMASK_SERVER_MIMIC |
                           CEPH_FEATUREMASK_SERVER_NAUTILUS;
   {
-    pg_pool_t p;
-    std::list<pg_pool_t*> pools;
-
-    p.generate_test_instances(pools);
+    std::list<pg_pool_t> pools = pg_pool_t::generate_test_instances();
     for(auto p1 : pools){
       bufferlist bl;
-      p1->encode(bl, features);
+      p1.encode(bl, features);
       bl.hexdump(std::cout);
       auto pbl = bl.cbegin();
       pg_pool_t p2;
       p2.decode(pbl);
-      compare_pg_pool_t(*p1, p2);
+      compare_pg_pool_t(p1, p2);
     }
   }
 
   {
     // test reef
-    pg_pool_t p;
-    std::list<pg_pool_t*> pools;
-    p.generate_test_instances(pools);
+    std::list<pg_pool_t> pools = pg_pool_t::generate_test_instances();
     for(auto p1 : pools){
       bufferlist bl;
-      p1->encode(bl, features|CEPH_FEATUREMASK_SERVER_REEF);
+      p1.encode(bl, features|CEPH_FEATUREMASK_SERVER_REEF);
       bl.hexdump(std::cout);
       auto pbl = bl.cbegin();
       pg_pool_t p2;
       p2.decode(pbl);
-      compare_pg_pool_t(*p1, p2);
+      compare_pg_pool_t(p1, p2);
     }
   }
 }
@@ -1157,7 +1153,7 @@ TEST(pg_missing_t, add_next_event)
     missing.add_next_event(e, pg_pool_t(), shard_id_t());
     EXPECT_TRUE(missing.is_missing(oid));
     EXPECT_EQ(eversion_t(), missing.get_items().at(oid).have);
-    EXPECT_EQ(oid, missing.get_rmissing().at(e.version.version));
+    EXPECT_EQ(oid, missing.get_rmissing().at(e.version));
     EXPECT_EQ(1U, missing.num_missing());
     EXPECT_EQ(1U, missing.get_rmissing().size());
 
@@ -1182,7 +1178,7 @@ TEST(pg_missing_t, add_next_event)
     missing.add_next_event(e, pg_pool_t(), shard_id_t());
     EXPECT_TRUE(missing.is_missing(oid));
     EXPECT_EQ(eversion_t(), missing.get_items().at(oid).have);
-    EXPECT_EQ(oid, missing.get_rmissing().at(e.version.version));
+    EXPECT_EQ(oid, missing.get_rmissing().at(e.version));
     EXPECT_EQ(1U, missing.num_missing());
     EXPECT_EQ(1U, missing.get_rmissing().size());
 
@@ -1207,7 +1203,7 @@ TEST(pg_missing_t, add_next_event)
     missing.add_next_event(e, pg_pool_t(), shard_id_t());
     EXPECT_TRUE(missing.is_missing(oid));
     EXPECT_EQ(eversion_t(), missing.get_items().at(oid).have);
-    EXPECT_EQ(oid, missing.get_rmissing().at(e.version.version));
+    EXPECT_EQ(oid, missing.get_rmissing().at(e.version));
     EXPECT_EQ(1U, missing.num_missing());
     EXPECT_EQ(1U, missing.get_rmissing().size());
 
@@ -1234,7 +1230,7 @@ TEST(pg_missing_t, add_next_event)
     EXPECT_TRUE(missing.is_missing(oid));
     EXPECT_EQ(prior_version, missing.get_items().at(oid).have);
     EXPECT_EQ(version, missing.get_items().at(oid).need);
-    EXPECT_EQ(oid, missing.get_rmissing().at(e.version.version));
+    EXPECT_EQ(oid, missing.get_rmissing().at(e.version));
     EXPECT_EQ(1U, missing.num_missing());
     EXPECT_EQ(1U, missing.get_rmissing().size());
   }
@@ -1259,7 +1255,7 @@ TEST(pg_missing_t, add_next_event)
     EXPECT_TRUE(missing.get_items().at(oid).is_delete());
     EXPECT_EQ(prior_version, missing.get_items().at(oid).have);
     EXPECT_EQ(version, missing.get_items().at(oid).need);
-    EXPECT_EQ(oid, missing.get_rmissing().at(e.version.version));
+    EXPECT_EQ(oid, missing.get_rmissing().at(e.version));
     EXPECT_EQ(1U, missing.num_missing());
     EXPECT_EQ(1U, missing.get_rmissing().size());
   }
@@ -1286,7 +1282,7 @@ TEST(pg_missing_t, add_next_event)
     EXPECT_TRUE(missing.get_items().at(oid).is_delete());
     EXPECT_EQ(prior_version, missing.get_items().at(oid).have);
     EXPECT_EQ(e.version, missing.get_items().at(oid).need);
-    EXPECT_EQ(oid, missing.get_rmissing().at(e.version.version));
+    EXPECT_EQ(oid, missing.get_rmissing().at(e.version));
     EXPECT_EQ(1U, missing.num_missing());
     EXPECT_EQ(1U, missing.get_rmissing().size());
   }
@@ -1422,8 +1418,8 @@ TEST(pg_missing_t, split_into)
   uint32_t hash2 = 2;
   hobject_t oid2(object_t("objname"), "key2", 123, hash2, 0, "");
   pg_missing_t missing;
-  missing.add(oid1, eversion_t(), eversion_t(), false);
-  missing.add(oid2, eversion_t(), eversion_t(), false);
+  missing.add(oid1, eversion_t(1, 1), eversion_t(), false);
+  missing.add(oid2, eversion_t(1, 2), eversion_t(), false);
   pg_t child_pgid;
   child_pgid.m_seed = 1;
   pg_missing_t child;

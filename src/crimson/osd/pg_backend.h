@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -65,6 +65,7 @@ public:
   using rep_op_fut_t = interruptible_future<rep_op_ret_t>;
   PGBackend(shard_id_t shard, CollectionRef coll,
             crimson::osd::ShardServices &shard_services,
+            store_index_t store_index,
             DoutPrefixProvider &dpp);
   virtual ~PGBackend() = default;
   static std::unique_ptr<PGBackend> create(pg_t pgid,
@@ -439,7 +440,7 @@ protected:
   CollectionRef coll;
   crimson::osd::ShardServices &shard_services;
   DoutPrefixProvider &dpp; ///< provides log prefix context
-  crimson::os::FuturizedStore::Shard* store;
+  crimson::os::BackendStore store;
   virtual seastar::future<> request_committed(
     const osd_reqid_t& reqid,
     const eversion_t& at_version) = 0;

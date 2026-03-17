@@ -113,6 +113,10 @@ if(NOT MSVC)
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wno-ignored-qualifiers>)
 endif()
 
+if (CMAKE_CXX_COMPILER_ID STREQUAL Clang)
+  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wsign-compare>)
+endif()
+
 add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-ftemplate-depth-1024>)
 
 # Because Boost can't be bothered to not include its own deprecated headers
@@ -168,6 +172,7 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL Clang)
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wno-mismatched-tags>)
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wno-unused-private-field>)
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wno-address-of-packed-member>)
+  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wno-unknown-warning-option>)
   add_compile_options(
     -Wno-unused-function
     -Wno-unused-local-typedef
@@ -194,16 +199,12 @@ if(WITH_CEPH_DEBUG_MUTEX)
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-DCEPH_DEBUG_MUTEX>)
 endif()
 
+if(WITH_CPUTRACE)
+  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-DWITH_CPUTRACE>)
+endif()
+
 include(CheckCCompilerFlag)
 if(CMAKE_CXX_COMPILER_ID STREQUAL GNU)
-  CHECK_C_COMPILER_FLAG("-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2" HAS_FORTIFY_SOURCE)
-  if(NOT CMAKE_BUILD_TYPE STREQUAL Debug)
-    if(HAS_FORTIFY_SOURCE)
-      add_definitions(
-        -U_FORTIFY_SOURCE
-        -D_FORTIFY_SOURCE=2)
-    endif()
-  endif()
     CHECK_C_COMPILER_FLAG(-fstack-protector-strong HAS_STACK_PROTECT)
     if (HAS_STACK_PROTECT)
       add_compile_options(-fstack-protector-strong)
@@ -241,11 +242,11 @@ if(HAVE_INTEL)
   endif()
 endif()
 
-# require c++20
-set(CMAKE_CXX_STANDARD 20)
+# require c++23
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_C_STANDARD 99)
+set(CMAKE_C_STANDARD 11)
 # we use `asm()` to inline assembly, so enable the GNU extension
 set(CMAKE_C_EXTENSIONS ON)
 set(C_STANDARD_REQUIRED ON)
@@ -462,7 +463,7 @@ if(WITH_CRIMSON)
     endif()
   endmacro ()
   set(Seastar_API_LEVEL "6" CACHE STRING "" FORCE)
-  set(Seastar_IO_URING OFF CACHE BOOL "" FORCE)
+  set(Seastar_IO_URING ${HAVE_LIBURING} CACHE BOOL "" FORCE)
   set(Seastar_DEPRECATED_OSTREAM_FORMATTERS OFF CACHE BOOL "" FORCE)
   if(Seastar_DPDK)
     find_package(dpdk QUIET)
@@ -471,7 +472,21 @@ if(WITH_CRIMSON)
       build_dpdk(${CMAKE_BINARY_DIR}/src/dpdk)
     endif()
   endif()
+  set(old_BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS})
+  if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+    # - Debug: shared seastar for faster development iteration
+    #   shared seastar is allowed for faster linking and smaller executables during
+    #   development.
+    #   Note: shared seastar won't be packaged, so this is for developers only
+    # - RelWithDebInfo/Release/MinSizeRel: static seastar for production packages
+    #   This ensures packages don't depend on libseastar.so, and avoids the performance penalty
+    #   of calling functions in shared library.
+    set(BUILD_SHARED_LIBS FALSE)
+  endif()
   add_subdirectory(seastar)
+  set(BUILD_SHARED_LIBS ${old_BUILD_SHARED_LIBS})
+  unset(old_BUILD_SHARED_LIBS)
+
   # create the directory so cmake won't complain when looking at the imported
   # target: Seastar exports this directory created at build-time
   file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/seastar/gen/include")
@@ -500,7 +515,14 @@ set(libcommon_files
   ceph_ver.c
   global/global_context.cc
   xxHash/xxhash.c
+  include/filepath.cc
+  include/invoke_date.cc
+  include/object.cc
+  include/types.cc
+  include/utime.cc
+  include/uuid.cc
   common/error_code.cc
+  common/frag.cc
   common/tracer.cc
   log/Log.cc
   mon/MonCap.cc
@@ -524,6 +546,7 @@ set(libcommon_files
   osdc/Striper.cc
   osdc/Objecter.cc
   osdc/error_code.cc
+  osdc/SplitOp.cc
   librbd/Features.cc
   librbd/io/IoOperations.cc
   ${mds_files})
@@ -558,12 +581,13 @@ set(ceph_common_objs
   $<TARGET_OBJECTS:compressor_objs>
   $<TARGET_OBJECTS:common-objs>
   $<TARGET_OBJECTS:common_mountcephfs_objs>
-  $<TARGET_OBJECTS:crush_objs>)
+  $<TARGET_OBJECTS:crush_objs>
+  $<TARGET_OBJECTS:json_spirit>
+  $<TARGET_OBJECTS:erasure_code>)
 set(ceph_common_deps
-  json_spirit erasure_code extblkdev arch crc32
+  common_utf8 extblkdev arch crc32
   ${LIB_RESOLV}
   Boost::thread
-  Boost::system
   Boost::random
   Boost::program_options
   Boost::date_time
@@ -1073,6 +1097,7 @@ if(WITH_NVMEOF_GATEWAY_MONITOR_CLIENT)
     ${nvmeof_monitor_grpc_hdrs}
     ceph_nvmeof_monitor_client.cc
     nvmeof/NVMeofGwClient.cc
+    nvmeof/NVMeofGwUtils.cc
     nvmeof/NVMeofGwMonitorGroupClient.cc
     nvmeof/NVMeofGwMonitorClient.cc)
   add_executable(ceph-nvmeof-monitor-client ${ceph_nvmeof_monitor_client_srcs})
@@ -1130,8 +1155,8 @@ endif(WITH_KVS)
 if(WITH_RADOSGW)
   if(WITH_RADOSGW_SELECT_PARQUET OR WITH_RADOSGW_ARROW_FLIGHT)
     if(WITH_SYSTEM_ARROW)
-      find_package(Arrow 4 REQUIRED QUIET)
-      find_package(Parquet 4 REQUIRED QUIET)
+      find_package(Arrow 9 REQUIRED QUIET)
+      find_package(Parquet 9 REQUIRED QUIET)
     else()
       # find arrow's dependencies
       if (WITH_SYSTEM_UTF8PROC)

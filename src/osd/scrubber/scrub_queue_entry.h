@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 #pragma once
 
 #include <compare>
@@ -8,6 +9,10 @@
 #include "include/utime.h"
 #include "osd/osd_types.h"
 #include "osd/scrubber_common.h"
+
+namespace ceph {
+class Formatter;
+}  // namespace ceph
 
 namespace Scrub {
 
@@ -83,6 +88,8 @@ struct SchedEntry {
   /// either 'none', or the reason for the latest failure/delay (for
   /// logging/reporting purposes)
   delay_cause_t last_issue{delay_cause_t::none};
+
+  void dump(ceph::Formatter& f) const;
 };
 
 

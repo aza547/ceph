@@ -1,10 +1,11 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #pragma once
 
 #include <boost/intrusive_ptr.hpp>
 #include "include/ceph_assert.h"
+#include "include/timegm.h" // for internal_timegm()
 #include "rgw_coroutine.h"
 #include "rgw_sal.h"
 #include "rgw_sal_rados.h"
@@ -44,6 +45,20 @@ public:
   void send_request(const DoutPrefixProvider *dpp) {
     get();
     retcode = _send_request(dpp);
+    {
+      std::lock_guard l{lock};
+      if (notifier) {
+        notifier->cb(); // drops its own ref
+        notifier = nullptr;
+      }
+    }
+    put();
+  }
+
+  // Complete immediately with a specific rc without sending any request.
+  void complete_immediate(int rc) {
+    get();
+    retcode = rc;
     {
       std::lock_guard l{lock};
       if (notifier) {

@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "./osd_scrub.h"
 
@@ -59,7 +59,8 @@ std::ostream& OsdScrub::gen_prefix(std::ostream& out, std::string_view fn) const
 
 void OsdScrub::dump_scrubs(ceph::Formatter* f) const
 {
-  m_queue.dump_scrubs(f);
+  ceph_assert(f != nullptr);
+  m_queue.dump_scrubs(*f);
 }
 
 void OsdScrub::dump_scrub_reservations(ceph::Formatter* f) const

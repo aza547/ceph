@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #pragma once
 
@@ -70,29 +70,6 @@ struct get_obj_data;
 #define PUT_OBJ_EXCL        0x02
 #define PUT_OBJ_CREATE_EXCL (PUT_OBJ_CREATE | PUT_OBJ_EXCL)
 
-static inline void prepend_bucket_marker(const rgw_bucket& bucket, const std::string& orig_oid, std::string& oid)
-{
-  if (bucket.marker.empty() || orig_oid.empty()) {
-    oid = orig_oid;
-  } else {
-    oid = bucket.marker;
-    oid.append("_");
-    oid.append(orig_oid);
-  }
-}
-
-static inline void get_obj_bucket_and_oid_loc(const rgw_obj& obj, std::string& oid, std::string& locator)
-{
-  const rgw_bucket& bucket = obj.bucket;
-  prepend_bucket_marker(bucket, obj.get_oid(), oid);
-  const std::string& loc = obj.key.get_loc();
-  if (!loc.empty()) {
-    prepend_bucket_marker(bucket, loc, locator);
-  } else {
-    locator.clear();
-  }
-}
-
 struct RGWOLHInfo {
   rgw_obj target;
   bool removed;
@@ -112,7 +89,7 @@ struct RGWOLHInfo {
      decode(removed, bl);
      DECODE_FINISH(bl);
   }
-  static void generate_test_instances(std::list<RGWOLHInfo*>& o);
+  static std::list<RGWOLHInfo> generate_test_instances();
   void dump(Formatter *f) const;
 };
 WRITE_CLASS_ENCODER(RGWOLHInfo)
@@ -135,7 +112,7 @@ struct RGWOLHPendingInfo {
   }
 
   void dump(Formatter *f) const;
-  static void generate_test_instances(std::list<RGWOLHPendingInfo*>& o);
+  static std::list<RGWOLHPendingInfo> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(RGWOLHPendingInfo)
 
@@ -196,11 +173,6 @@ class RGWObjectCtx {
   std::map<rgw_obj, RGWObjStateManifest> objs_state;
 public:
   explicit RGWObjectCtx(rgw::sal::Driver* _driver) : driver(_driver) {}
-  RGWObjectCtx(RGWObjectCtx& _o) {
-    std::unique_lock wl{lock};
-    this->driver = _o.driver;
-    this->objs_state = _o.objs_state;
-  }
 
   rgw::sal::Driver* get_driver() {
     return driver;
@@ -214,6 +186,15 @@ public:
   void invalidate(const rgw_obj& obj);
 };
 
+// Enforce at compile time that RGWObjectCtx is neither copyable nor movable
+static_assert(!std::is_copy_constructible<RGWObjectCtx>::value,
+              "RGWObjectCtx must not be copy-constructed");
+static_assert(!std::is_copy_assignable<RGWObjectCtx>::value,
+              "RGWObjectCtx must not be copy-assigned");
+static_assert(!std::is_move_constructible<RGWObjectCtx>::value,
+              "RGWObjectCtx must not be move-constructed");
+static_assert(!std::is_move_assignable<RGWObjectCtx>::value,
+              "RGWObjectCtx must not be move-assigned");
 
 struct RGWRawObjState {
   rgw_raw_obj obj;
@@ -298,7 +279,7 @@ struct objexp_hint_entry {
   }
 
   void dump(Formatter *f) const;
-  static void generate_test_instances(std::list<objexp_hint_entry*>& o);
+  static std::list<objexp_hint_entry> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(objexp_hint_entry)
 
@@ -364,6 +345,7 @@ class RGWRados
   int open_objexp_pool_ctx(const DoutPrefixProvider *dpp);
   int open_reshard_pool_ctx(const DoutPrefixProvider *dpp);
   int open_notif_pool_ctx(const DoutPrefixProvider *dpp);
+  int open_logging_pool_ctx(const DoutPrefixProvider *dpp);
 
   int open_pool_ctx(const DoutPrefixProvider *dpp, const rgw_pool& pool, librados::IoCtx&  io_ctx,
 		    bool mostly_omap, bool bulk);
@@ -384,6 +366,7 @@ class RGWRados
   bool run_sync_thread{false};
   bool run_reshard_thread{false};
   bool run_notification_thread{false};
+  bool run_bucket_logging_thread{false};
 
   RGWMetaNotifier* meta_notifier{nullptr};
   RGWDataNotifier* data_notifier{nullptr};
@@ -459,6 +442,7 @@ protected:
   librados::IoCtx objexp_pool_ctx;
   librados::IoCtx reshard_pool_ctx;
   librados::IoCtx notif_pool_ctx;     // .rgw.notif
+  librados::IoCtx logging_pool_ctx;     // .rgw.logging
 
   bool pools_initialized{false};
 
@@ -546,6 +530,11 @@ public:
     return *this;
   }
 
+  RGWRados& set_run_bucket_logging_thread(bool _run_bucket_logging_thread) {
+    run_bucket_logging_thread = _run_bucket_logging_thread;
+    return *this;
+  }
+
   librados::IoCtx* get_lc_pool_ctx() {
     return &lc_pool_ctx;
   }
@@ -560,6 +549,10 @@ public:
   
   librados::IoCtx& get_notif_pool_ctx() {
     return notif_pool_ctx;
+  }
+
+  librados::IoCtx& get_logging_pool_ctx() {
+    return logging_pool_ctx;
   }
   
   void set_context(CephContext *_cct) {
@@ -717,8 +710,12 @@ public:
     int get_state(const DoutPrefixProvider *dpp, RGWObjState **pstate, RGWObjManifest **pmanifest, bool follow_olh, optional_yield y, bool assume_noent = false);
     void invalidate_state();
 
-    int prepare_atomic_modification(const DoutPrefixProvider *dpp, librados::ObjectWriteOperation& op, bool reset_obj, const std::string *ptag,
-                                    const char *ifmatch, const char *ifnomatch, bool removal_op, bool modify_tail, optional_yield y);
+    int get_current_version_state(const DoutPrefixProvider *dpp, RGWObjState*& current_state, optional_yield y);
+    int check_preconditions(const DoutPrefixProvider *dpp, std::optional<uint64_t> size_match,
+                              ceph::real_time last_mod_time_match, bool high_precision_time,
+                              const char *if_match, const char *if_nomatch, RGWObjState& current_state, optional_yield y);
+    int prepare_atomic_modification(const DoutPrefixProvider *dpp, librados::ObjectWriteOperation& op, bool reset_obj,
+                                    const std::string *ptag, bool modify_tail, bool set_attr_id_tag, optional_yield y);
     int complete_atomic_modification(const DoutPrefixProvider *dpp, bool keep_tail, optional_yield y);
 
   public:
@@ -782,8 +779,8 @@ public:
         bool high_precision_time;
         uint32_t mod_zone_id;
         uint64_t mod_pg_ver;
-        const char *if_match;
-        const char *if_nomatch;
+        const char *if_match{nullptr};
+        const char *if_nomatch{nullptr};
 
         ConditionParams() :
                  mod_ptr(NULL), unmod_ptr(NULL), high_precision_time(false), mod_zone_id(0), mod_pg_ver(0),
@@ -829,8 +826,8 @@ public:
         ACLOwner owner; // owner/owner_display_name for bucket index
         RGWObjCategory category;
         int flags;
-        const char *if_match;
-        const char *if_nomatch;
+        const char *if_match{nullptr};
+        const char *if_nomatch{nullptr};
         std::optional<uint64_t> olh_epoch;
         ceph::real_time delete_at;
         bool canceled;
@@ -877,7 +874,10 @@ public:
         std::list<rgw_obj_index_key> *remove_objs;
         ceph::real_time expiration_time;
         ceph::real_time unmod_since;
+        ceph::real_time last_mod_time_match;
         ceph::real_time mtime; /* for setting delete marker mtime */
+        std::optional<uint64_t> size_match;
+        const char *if_match{nullptr};
         bool high_precision_time;
         rgw_zone_set *zones_trace;
 	bool abortmp;
@@ -899,7 +899,9 @@ public:
       int delete_obj(optional_yield y,
 		     const DoutPrefixProvider* dpp,
 		     bool log_op,
-		     const bool force); // if head object missing, do a best effort
+		     const bool force, // if head object missing, do a best effort
+		     const bool skip_olh_obj_update // true for all deletes (except the last one) initiated by a multi-object delete op
+        );
     }; // struct RGWRados::Object::Delete
 
     struct Stat {
@@ -1249,6 +1251,7 @@ public:
                std::string *petag,
                void (*progress_cb)(off_t, void *),
                void *progress_data,
+               rgw::sal::DataProcessorFactory *dp_factory,
                const DoutPrefixProvider *dpp,
                optional_yield y,
                jspan_context& trace);
@@ -1265,6 +1268,7 @@ public:
                uint64_t olh_epoch,
 	       ceph::real_time delete_at,
                std::string *petag,
+               rgw::sal::DataProcessorFactory *dp_factory,
                const DoutPrefixProvider *dpp,
                optional_yield y,
                bool log_op = true);
@@ -1285,6 +1289,7 @@ int restore_obj_from_cloud(RGWLCCloudTierCtx& tier_ctx,
                              RGWObjTier& tier_config,
                              std::optional<uint64_t> days,
 			     bool& in_progress,
+			     uint64_t& size,
                              const DoutPrefixProvider *dpp,
                              optional_yield y);
 
@@ -1321,7 +1326,8 @@ int restore_obj_from_cloud(RGWLCCloudTierCtx& tier_ctx,
 		 const ceph::real_time& expiration_time = ceph::real_time(),
 		 rgw_zone_set *zones_trace = nullptr,
                  bool log_op = true,
-                 const bool force = false); // if head object missing, do a best effort
+                 const bool force = false, // if head object missing, do a best effort
+                 const bool skip_olh_obj_update = false); // true for all deletes (except the last one) initiated by a multi-object delete op
 
   int delete_raw_obj(const DoutPrefixProvider *dpp, const rgw_raw_obj& obj, optional_yield y);
 
@@ -1468,7 +1474,7 @@ int restore_obj_from_cloud(RGWLCCloudTierCtx& tier_ctx,
                           uint64_t olh_epoch, optional_yield y,
 			  uint16_t bilog_flags, bool null_verid,
 			  rgw_zone_set *zones_trace = nullptr,
-			  bool log_op = true, const bool force = false);
+			  bool log_op = true, const bool force = false, const bool skip_olh_obj_update = false);
 
   void check_pending_olh_entries(const DoutPrefixProvider *dpp, std::map<std::string, bufferlist>& pending_entries, std::map<std::string, bufferlist> *rm_pending_entries);
   int remove_olh_pending_entries(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, RGWObjState& state, const rgw_obj& olh_obj, std::map<std::string, bufferlist>& pending_attrs, optional_yield y);
@@ -1676,7 +1682,8 @@ public:
 
   librados::Rados* get_rados_handle();
 
-  int delete_raw_obj_aio(const DoutPrefixProvider *dpp, const rgw_raw_obj& obj, std::list<librados::AioCompletion *>& handles);
+  int delete_tail_obj_aio(const DoutPrefixProvider *dpp, const rgw_raw_obj& obj,
+                          const std::string& tag, std::list<librados::AioCompletion *>& handles);
   int delete_obj_aio(const DoutPrefixProvider *dpp, const rgw_obj& obj, RGWBucketInfo& info, RGWObjState *astate,
                      std::list<librados::AioCompletion *>& handles, bool keep_index_consistent,
                      optional_yield y);

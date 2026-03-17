@@ -1,4 +1,4 @@
-# vim: expandtab smarttab shiftwidth=4 softtabstop=4
+# vim: expandtab shiftwidth=4 softtabstop=4
 import base64
 import copy
 import errno
@@ -33,7 +33,8 @@ from rbd import (RBD, Group, Image, ImageNotFound, InvalidArgument, ImageExists,
                  RBD_MIRROR_IMAGE_ENABLED, RBD_MIRROR_IMAGE_DISABLED,
                  MIRROR_IMAGE_STATUS_STATE_UNKNOWN,
                  RBD_MIRROR_IMAGE_MODE_JOURNAL, RBD_MIRROR_IMAGE_MODE_SNAPSHOT,
-                 RBD_LOCK_MODE_EXCLUSIVE, RBD_OPERATION_FEATURE_GROUP,
+                 RBD_LOCK_MODE_EXCLUSIVE, RBD_LOCK_MODE_EXCLUSIVE_TRANSIENT,
+                 RBD_OPERATION_FEATURE_GROUP,
                  RBD_OPERATION_FEATURE_CLONE_CHILD,
                  RBD_SNAP_NAMESPACE_TYPE_USER,
                  RBD_SNAP_NAMESPACE_TYPE_GROUP,
@@ -817,7 +818,6 @@ class TestImage(object):
         self._test_copy(features, self.image.stat()['order'],
                         self.image.stripe_unit(), self.image.stripe_count())
 
-    @pytest.mark.skip_if_crimson
     def test_deep_copy(self):
         global ioctx
         global features
@@ -2445,12 +2445,14 @@ class TestExclusiveLock(object):
             for offset in [0, IMG_SIZE // 2]:
                 read = image2.read(offset, 256)
                 eq(data, read)
+
     def test_acquire_release_lock(self):
         with Image(ioctx, image_name) as image:
             image.lock_acquire(RBD_LOCK_MODE_EXCLUSIVE)
             image.lock_release()
+            image.lock_acquire(RBD_LOCK_MODE_EXCLUSIVE_TRANSIENT)
+            image.lock_release()
 
-    @pytest.mark.skip_if_crimson
     def test_break_lock(self):
         blocklist_rados = Rados(conffile='')
         blocklist_rados.connect()

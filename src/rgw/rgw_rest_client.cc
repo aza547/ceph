@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include "rgw_common.h"
 #include "rgw_rest_client.h"
@@ -111,18 +111,13 @@ static void get_new_date_str(string& date_str)
   date_str = rgw_to_asctime(ceph_clock_now());
 }
 
-static void get_gmt_date_str(string& date_str)
+static std::string get_gmt_date_str()
 {
   auto now_time = ceph::real_clock::now();
   time_t rawtime = ceph::real_clock::to_time_t(now_time);
 
-  char buffer[80];
-
-  struct tm timeInfo;
-  gmtime_r(&rawtime, &timeInfo);
-  strftime(buffer, sizeof(buffer), "%a, %d %b %Y %H:%M:%S %z", &timeInfo);  
-  
-  date_str = buffer;
+  // Fri, 21 Dec 2012 00:00:00 GMT
+  return fmt::format("{:%a, %d %b %Y %T %Z}", fmt::gmtime(rawtime));
 }
 
 int RGWHTTPSimpleRequest::send_data(void *ptr, size_t len, bool* pause)
@@ -587,14 +582,14 @@ void RGWRESTGenerateHTTPHeaders::init(const string& _method, const string& host,
 
   /* merge params with extra args so that we can sign correctly */
   for (auto iter = params.begin(); iter != params.end(); ++iter) {
-    new_info->args.append(iter->first, iter->second);
+    constexpr bool encode_slash = false; // not for query params
+    new_info->args.append(url_encode(iter->first, encode_slash),
+                          url_encode(iter->second, encode_slash));
   }
 
   url = _url + resource + params_str;
 
-  string date_str;
-  get_gmt_date_str(date_str);
-
+  const std::string date_str = get_gmt_date_str();
   new_env->set("HTTP_DATE", date_str.c_str());
   new_env->set("HTTP_HOST", host);
 
@@ -704,7 +699,7 @@ void RGWRESTStreamS3PutObj::send_init(const rgw_obj& obj)
   if (host_style == VirtualStyle) {
     resource_str = obj.get_oid();
 
-    new_url = bucket_name + "."  + new_url;
+    new_url = protocol + "://" + bucket_name + "." + host;
     new_host = bucket_name + "." + new_host;
   } else {
     resource_str = bucket_name + "/" + obj.get_oid();
@@ -715,6 +710,8 @@ void RGWRESTStreamS3PutObj::send_init(const rgw_obj& obj)
 
   if (new_url[new_url.size() - 1] != '/')
     new_url.append("/");
+
+  ldpp_dout(this, 20) << __func__ << "(): host = " << host << " , resource = " << resource << " , new_host = " << new_host << " , new_url = " << new_url  << dendl;
 
   method = "PUT";
   headers_gen.init(method, new_host, resource_prefix, new_url, resource, params, api_name);
@@ -841,6 +838,7 @@ int RGWRESTStreamRWRequest::do_send_prepare(const DoutPrefixProvider *dpp, RGWAc
   string new_resource;
   string bucket_name;
   string old_resource = resource;
+  string new_host = host;
 
   if (resource[0] == '/') {
     new_resource = resource.substr(1);
@@ -863,11 +861,17 @@ int RGWRESTStreamRWRequest::do_send_prepare(const DoutPrefixProvider *dpp, RGWAc
     } else {
       new_resource = new_resource.substr(pos+1);
     }
+    new_host = bucket_name + "." + host;
   }
+
+  if (new_url[new_url.size() - 1] != '/')
+    new_url.append("/");
 
   headers_gen.emplace(cct, &new_env, &new_info);
 
-  headers_gen->init(method, host, resource_prefix, new_url, new_resource, params, api_name);
+  ldpp_dout(this, 20) << __func__ << "(): host = " << host << " , resource = " << resource << " , new_host = " << new_host << " , new_url = " << new_url  << " , new_resource = " << new_resource << dendl;
+
+  headers_gen->init(method, new_host, resource_prefix, new_url, new_resource, params, api_name);
 
   headers_gen->set_http_attrs(extra_headers);
 
@@ -902,7 +906,7 @@ int RGWRESTStreamRWRequest::send_request(const DoutPrefixProvider *dpp, RGWAcces
 int RGWRESTStreamRWRequest::send(RGWHTTPManager *mgr)
 {
   if (!headers_gen) {
-    ldpp_dout(this, 0) << "ERROR: " << __func__ << "(): send_prepare() was not called: likey a bug!" << dendl;
+    ldpp_dout(this, 0) << "ERROR: " << __func__ << "(): send_prepare() was not called: likely a bug!" << dendl;
     return -EINVAL;
   }
 

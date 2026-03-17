@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
-// vim: ts=8 sw=2 smarttab expandtab
+// vim: ts=8 sw=2 sts=2 expandtab expandtab
 
 #pragma once
 
@@ -88,6 +88,7 @@ class PG : public boost::intrusive_ref_counter<
   spg_t pgid;
   pg_shard_t pg_whoami;
   crimson::os::CollectionRef coll_ref;
+  store_index_t store_index;
   ghobject_t pgmeta_oid;
 
   seastar::timer<seastar::lowres_clock> check_readable_timer;
@@ -101,6 +102,7 @@ public:
 
   PG(spg_t pgid,
      pg_shard_t pg_shard,
+     store_index_t store_index,
      crimson::os::CollectionRef coll_ref,
      pg_pool_t&& pool,
      std::string&& name,
@@ -118,6 +120,9 @@ public:
     return pgid;
   }
 
+  const unsigned int get_store_index() {
+    return store_index;
+  }
   PGBackend& get_backend() {
     return *backend;
   }
@@ -198,6 +203,7 @@ public:
     std::swap(o, orderer);
     return seastar::when_all(
       shard_services.dispatch_context(
+        store_index,
 	get_collection_ref(),
 	std::move(rctx)),
       shard_services.run_orderer(std::move(o))
@@ -335,6 +341,7 @@ public:
     PGPeeringEventRef on_commit) final {
     LOG_PREFIX(PG::schedule_event_on_commit);
     SUBDEBUGDPP(osd, "on_commit {}", *this, on_commit->get_desc());
+
     t.register_on_commit(
       make_lambda_context(
 	[this, on_commit=std::move(on_commit)](int) {
@@ -594,13 +601,17 @@ public:
     const PastIntervals& pim,
     ceph::os::Transaction &t);
 
-  seastar::future<> read_state(crimson::os::FuturizedStore::Shard* store);
+  seastar::future<> read_state(crimson::os::BackendStore store);
 
   void do_peering_event(PGPeeringEvent& evt, PeeringCtx &rctx);
 
   void handle_advance_map(cached_map_t next_map, PeeringCtx &rctx);
   void handle_activate_map(PeeringCtx &rctx);
   void handle_initialize(PeeringCtx &rctx);
+
+  void update_snap_mapper_bits(uint32_t bits) {
+    snap_mapper.update_bits(bits);
+  }
 
   void start_split_stats(const std::set<spg_t>& childpgs, std::vector<object_stat_sum_t> *out) {
     peering_state.start_split_stats(childpgs, out);
@@ -625,12 +636,14 @@ public:
       seed,
       target);
     init_pg_ondisk(t, child, pool);
-    return shard_services.get_store().do_transaction(
+    return crimson::os::with_store_do_transaction(
+      shard_services.get_store(store_index),
       coll_ref, std::move(t));
   }
 
   void split_into(pg_t child_pgid, Ref<PG> child, unsigned split_bits) {
     peering_state.split_into(child_pgid, &child->peering_state, split_bits);
+    child->update_snap_mapper_bits(split_bits);
     child->snap_trimq = snap_trimq;
   }
 
@@ -670,7 +683,7 @@ public:
     bool transaction_applied,
     ObjectStore::Transaction &txn,
     bool async = false);
-  void replica_clear_repop_obc(
+  void clear_repop_obc(
     const std::vector<pg_log_entry_t> &logv);
   void handle_rep_op_reply(const MOSDRepOpReply& m);
   interruptible_future<> do_update_log_missing(
@@ -931,9 +944,17 @@ public:
     int *return_code,
     std::vector<pg_log_op_return_item_t> *op_returns) const;
   int get_recovery_op_priority() const {
-    int64_t pri = 0;
-    get_pgpool().info.opts.get(pool_opts_t::RECOVERY_OP_PRIORITY, &pri);
-    return  pri > 0 ? pri : crimson::common::local_conf()->osd_recovery_op_priority;
+    return peering_state.get_recovery_op_priority();
+  }
+  int64_t get_average_object_size() {
+    const auto& stats = get_info().stats.stats.sum;
+    auto num_objects = stats.num_objects;
+    auto num_bytes =   stats.num_bytes;
+
+    if (num_objects <= 0)
+      return 0;
+
+    return num_bytes / num_objects;
   }
   seastar::future<> mark_unfound_lost(int) {
     // TODO: see PrimaryLogPG::mark_all_unfound_lost()

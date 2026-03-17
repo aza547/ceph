@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=2 sw=2 expandtab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=2 sw=2 sts=2 expandtab ft=cpp
 
 /*
  * Ceph - scalable distributed file system
@@ -1542,6 +1542,7 @@ int MotrObject::copy_object(const ACLOwner& owner,
     std::string* tag,
     std::string* etag,
     void (*progress_cb)(off_t, void *),
+    rgw::sal::DataProcessorFactory* dp_factory,
     void* progress_data,
     const DoutPrefixProvider* dpp,
     optional_yield y)
@@ -2675,7 +2676,9 @@ int MotrMultipartUpload::complete(const DoutPrefixProvider *dpp,
 				   std::string& tag, ACLOwner& owner,
 				   uint64_t olh_epoch,
 				   rgw::sal::Object* target_obj,
-				   prefix_map_t& processed_prefixes)
+				   prefix_map_t& processed_prefixes,
+           const char *if_match,
+           const char *if_nomatch)
 {
   char final_etag[CEPH_CRYPTO_MD5_DIGESTSIZE];
   char final_etag_str[CEPH_CRYPTO_MD5_DIGESTSIZE * 2 + 16];
@@ -3874,6 +3877,12 @@ int MotrStore::init_metadata_cache(const DoutPrefixProvider *dpp,
   int MotrLuaManager::get_script(const DoutPrefixProvider* dpp, optional_yield y, const std::string& key, std::string& script)
   {
     return -ENOENT;
+  }
+
+  std::tuple<rgw::lua::LuaCodeType, int> MotrLuaManager::get_script_or_bytecode(const DoutPrefixProvider* dpp, optional_yield y,
+                                                                                const std::string& key)
+  {
+    return std::make_tuple("", -ENOENT);
   }
 
   int MotrLuaManager::put_script(const DoutPrefixProvider* dpp, optional_yield y, const std::string& key, const std::string& script)

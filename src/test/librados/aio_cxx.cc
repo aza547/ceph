@@ -11,7 +11,9 @@
 
 #include "gtest/gtest.h"
 
+#include "common/Clock.h" // for ceph_clock_now()
 #include "common/errno.h"
+#include "include/encoding.h"
 #include "include/err.h"
 #include "include/rados/librados.hpp"
 #include "include/types.h"
@@ -99,11 +101,10 @@ TEST(LibRadosAio, PoolQuotaPP) {
   ASSERT_EQ(0, test_data.m_cluster.ioctx_create(p.c_str(), ioctx));
   ioctx.application_enable("rados", true);
 
-  bufferlist inbl;
   ASSERT_EQ(0, test_data.m_cluster.mon_command(
       "{\"prefix\": \"osd pool set-quota\", \"pool\": \"" + p +
       "\", \"field\": \"max_bytes\", \"val\": \"4096\"}",
-      inbl, NULL, NULL));
+      {}, NULL, NULL));
 
   bufferlist bl;
   bufferptr z(4096);
@@ -2389,7 +2390,6 @@ TEST(LibRadosAio, PoolEIOFlag) {
 
     if (i == max / 2) {
       t = new std::thread([&] {
-        bufferlist empty;
         cout << "sending pool EIO time: " << ceph_clock_now() << std::endl;
         ASSERT_EQ(0, test_data.m_cluster.mon_command(
           fmt::format(R"({{
@@ -2398,7 +2398,7 @@ TEST(LibRadosAio, PoolEIOFlag) {
             "var": "eio",
             "val": "true"
             }})", test_data.m_pool_name),
-       empty, nullptr, nullptr));
+          {}, nullptr, nullptr));
 
         {
           std::scoped_lock lk(my_lock);

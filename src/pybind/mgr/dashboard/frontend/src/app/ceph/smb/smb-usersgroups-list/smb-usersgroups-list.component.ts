@@ -29,7 +29,8 @@ export const USERSGROUPS_PATH = 'cephfs/smb/standalone';
   selector: 'cd-smb-users-list',
   templateUrl: './smb-usersgroups-list.component.html',
   styleUrls: ['./smb-usersgroups-list.component.scss'],
-  providers: [{ provide: URLBuilderService, useValue: new URLBuilderService(USERSGROUPS_PATH) }]
+  providers: [{ provide: URLBuilderService, useValue: new URLBuilderService(USERSGROUPS_PATH) }],
+  standalone: false
 })
 export class SmbUsersgroupsListComponent extends ListWithDetails implements OnInit {
   @ViewChild('groupsNamesTpl', { static: true })
@@ -76,7 +77,7 @@ export class SmbUsersgroupsListComponent extends ListWithDetails implements OnIn
       },
       {
         name: $localize`Linked to cluster`,
-        prop: 'values.linked_to_cluster',
+        prop: 'linked_to_cluster',
         flexGrow: 2
       }
     ];

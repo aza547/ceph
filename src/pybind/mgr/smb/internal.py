@@ -206,9 +206,42 @@ class UsersAndGroupsEntry(CommonResourceEntry):
         return self.get_resource_type(resources.UsersAndGroups)
 
 
-def _map_resource_entry(
-    resource: Union[SMBResource, Type[SMBResource]]
+class TLSCredentialEntry(CommonResourceEntry):
+    """TLSCredentialEntry resource getter/setter for the smb internal data
+    store(s).
+    """
+
+    namespace = ConfigNS.TLS_CREDENTIALS
+    _for_resource = resources.TLSCredential
+
+    @classmethod
+    def to_key(cls, resource: SMBResource) -> ResourceKey:
+        assert isinstance(resource, cls._for_resource)
+        return ResourceIDKey(resource.tls_credential_id)
+
+    def get_tls_credential(self) -> resources.TLSCredential:
+        return self.get_resource_type(resources.TLSCredential)
+
+
+class ExternalCephClusterEntry(CommonResourceEntry):
+    """ExternalCephCluster resource getter/setter for internal store."""
+
+    namespace = ConfigNS.EXTERNAL_CEPH_CLUSTERS
+    _for_resource = resources.ExternalCephCluster
+
+    @classmethod
+    def to_key(cls, resource: SMBResource) -> ResourceKey:
+        assert isinstance(resource, cls._for_resource)
+        return ResourceIDKey(resource.external_ceph_cluster_id)
+
+    def get_external_ceph_cluster(self) -> resources.ExternalCephCluster:
+        return self.get_resource_type(resources.ExternalCephCluster)
+
+
+def map_resource_entry(
+    resource: Union[SMBResource, Type[SMBResource]],
 ) -> Type[ResourceEntry]:
+    """Return an entry type class given a resource object or resource class."""
     rcls = resource if isinstance(resource, type) else type(resource)
     _map = {
         resources.Cluster: ClusterEntry,
@@ -217,6 +250,8 @@ def _map_resource_entry(
         resources.RemovedShare: ShareEntry,
         resources.JoinAuth: JoinAuthEntry,
         resources.UsersAndGroups: UsersAndGroupsEntry,
+        resources.TLSCredential: TLSCredentialEntry,
+        resources.ExternalCephCluster: ExternalCephClusterEntry,
     }
     try:
         return _map[rcls]
@@ -228,14 +263,14 @@ def resource_entry(
     store: ConfigStore, resource: SMBResource
 ) -> ResourceEntry:
     """Return a bound store entry object given a resource object."""
-    entry_cls = _map_resource_entry(resource)
+    entry_cls = map_resource_entry(resource)
     key = entry_cls.to_key(resource)
     return entry_cls.from_store_by_key(store, key)
 
 
 def resource_key(resource: SMBResource) -> EntryKey:
     """Return a store entry key for an smb resource object."""
-    entry_cls = _map_resource_entry(resource)
+    entry_cls = map_resource_entry(resource)
     key = entry_cls.to_key(resource)
     return str(entry_cls.namespace), str(key)
 

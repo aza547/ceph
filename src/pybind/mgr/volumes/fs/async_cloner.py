@@ -135,22 +135,21 @@ def bulk_copy(fs_handle, source_path, dst_path, should_cancel):
                         if stat.S_ISDIR(stx["mode"]):
                             log.debug("cptree: (DIR) {0}".format(d_full_src))
                             try:
-                                fs_handle.mkdir(d_full_dst, mo)
+                                fs_handle.fcopyfile(d_full_src, d_full_dst, mo)
                             except cephfs.Error as e:
                                 if not e.args[0] == errno.EEXIST:
                                     raise
                             cptree(d_full_src, d_full_dst)
                         elif stat.S_ISLNK(stx["mode"]):
                             log.debug("cptree: (SYMLINK) {0}".format(d_full_src))
-                            target = fs_handle.readlink(d_full_src, 4096)
                             try:
-                                fs_handle.symlink(target[:stx["size"]], d_full_dst)
+                                fs_handle.fcopyfile(d_full_src, d_full_dst, mo)
                             except cephfs.Error as e:
                                 if not e.args[0] == errno.EEXIST:
                                     raise
                         elif stat.S_ISREG(stx["mode"]):
                             log.debug("cptree: (REG) {0}".format(d_full_src))
-                            copy_file(fs_handle, d_full_src, d_full_dst, mo, cancel_check=should_cancel)
+                            fs_handle.fcopyfile(d_full_src, d_full_dst, mo)
                         else:
                             handled = False
                             log.warning("cptree: (IGNORE) {0}".format(d_full_src))
@@ -229,12 +228,12 @@ def do_clone(fs_client, volspec, volname, groupname, subvolname, should_cancel):
             set_quota_on_clone(fs_handle, (subvol0, subvol1, subvol2))
 
 def update_clone_failure_status(fs_client, volspec, volname, groupname, subvolname, ve):
-    with open_clone_subvol_pair_in_vol(fs_client, volspec, volname, groupname,
-            subvolname, lockless=False) as (subvol0, subvol1, subvol2):
+    with open_at_volume(fs_client, volspec, volname, groupname, subvolname,
+                        SubvolumeOpType.CLONE_INTERNAL) as clone:
         if ve.errno == -errno.EINTR:
-            subvol0.add_clone_failure(-ve.errno, "user interrupted clone operation")
+            clone.add_clone_failure(-ve.errno, "user interrupted clone operation")
         else:
-            subvol0.add_clone_failure(-ve.errno, ve.error_str)
+            clone.add_clone_failure(-ve.errno, ve.error_str)
 
 def log_clone_failure(volname, groupname, subvolname, ve):
     if ve.errno == -errno.EINTR:
@@ -262,7 +261,7 @@ def handle_clone_failed(fs_client, volspec, volname, index, groupname, subvolnam
     try:
         # detach source but leave the clone section intact for later inspection
         with open_clone_subvol_pair_in_vol(fs_client, volspec, volname, groupname,
-                subvolname) as (subvol0, subvol1, subvol2):
+                subvolname, failed=True) as (subvol0, subvol1, subvol2):
             subvol1.detach_snapshot(subvol2, index)
     except (MetadataMgrException, VolumeException) as e:
         log.error("failed to detach clone from snapshot: {0}".format(e))
@@ -273,7 +272,6 @@ def handle_clone_complete(fs_client, volspec, volname, index, groupname, subvoln
         with open_clone_subvol_pair_in_vol(fs_client, volspec, volname,
                 groupname, subvolname) as (subvol0, subvol1, subvol2):
             subvol1.detach_snapshot(subvol2, index)
-            subvol0.remove_clone_source(flush=True)
     except (MetadataMgrException, VolumeException) as e:
         log.error("failed to detach clone from snapshot: {0}".format(e))
     return (None, True)

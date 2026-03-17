@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 /**
  * All operations via the rados gateway are carried out by
@@ -39,7 +39,7 @@
 #include "rgw_common.h"
 #include "rgw_dmclock.h"
 #include "rgw_sal.h"
-#include "rgw_user.h"
+#include "driver/rados/rgw_user.h"
 #include "rgw_bucket.h"
 #include "rgw_acl.h"
 #include "rgw_cors.h"
@@ -57,9 +57,6 @@
 #include "rgw_bucket_encryption.h"
 #include "rgw_tracer.h"
 
-#include "services/svc_sys_obj.h"
-#include "services/svc_tier_rados.h"
-
 #include "include/ceph_assert.h"
 
 struct req_state;
@@ -67,6 +64,7 @@ class RGWOp;
 class RGWRados;
 class RGWMultiCompleteUpload;
 class RGWPutObj_Torrent;
+class RGWMultiDelObject;
 
 namespace rgw::auth::registry { class StrategyRegistry; }
 
@@ -377,13 +375,45 @@ public:
   }
 };
 
+class DataProcessorFilter : public RGWGetObj_Filter
+{
+  rgw::sal::DataProcessor* processor;
+  off_t ofs = 0;
+
+public:
+  DataProcessorFilter() {}
+  explicit DataProcessorFilter(rgw::sal::DataProcessor* proc) : processor(proc) {}
+  ~DataProcessorFilter() override {}
+
+  void set_processor(rgw::sal::DataProcessor* proc) {
+    processor = proc;
+  }
+
+  int handle_data(bufferlist& bl, off_t bl_ofs, off_t bl_len) override {
+    // DataProcessor requires ownership of the entire bufferlist.
+    // RGWGetObj_Filter, however, may reuse the original bufferlist after this call.
+    // To avoid unintended side effects, we create a copy of the relevant portion.
+    bufferlist copy_bl;
+    bl.begin().copy(bl_len, copy_bl);
+
+    int ret = processor->process(std::move(copy_bl), ofs);
+    if (ret < 0) return ret;
+    ofs += bl_len;
+    return bl_len;
+  }
+
+  int flush() override {
+    return processor->process({}, ofs);
+  }
+};
+
 class RGWGetObj : public RGWOp {
 protected:
   const char *range_str;
   const char *if_mod;
   const char *if_unmod;
-  const char *if_match;
-  const char *if_nomatch;
+  const char *if_match{nullptr};
+  const char *if_nomatch{nullptr};
   uint32_t mod_zone_id;
   uint64_t mod_pg_ver;
   off_t ofs;
@@ -1148,10 +1178,13 @@ class RGWCreateBucket : public RGWOp {
   RGWAccessControlPolicy policy;
   std::string location_constraint;
   bool has_cors = false;
+  bool has_policy = false;
+  uint32_t policy_rw_mask = 0;
   bool relaxed_region_enforcement = false;
   RGWCORSConfiguration cors_config;
   std::set<std::string> rmattr_names;
   bufferlist in_data;
+  std::optional<rgw::s3::ObjectOwnership> object_ownership;
 
   virtual bool need_metadata_upload() const { return false; }
 
@@ -1251,8 +1284,8 @@ protected:
   off_t ofs;
   const char *supplied_md5_b64;
   const char *supplied_etag;
-  const char *if_match;
-  const char *if_nomatch;
+  const char *if_match{nullptr};
+  const char *if_nomatch{nullptr};
   std::string copy_source;
   const char *copy_source_range;
   RGWBucketInfo copy_source_bucket_info;
@@ -1532,6 +1565,9 @@ protected:
   bool multipart_delete;
   std::string version_id;
   ceph::real_time unmod_since; /* if unmodified since */
+  ceph::real_time last_mod_time_match; /* if modified time match */
+  std::optional<uint64_t> size_match; /* if size match */
+  const char *if_match{nullptr}; /* if etag match */
   bool no_precondition_error;
   std::unique_ptr<RGWBulkDelete::Deleter> deleter;
   bool bypass_perm;
@@ -1568,12 +1604,13 @@ protected:
   RGWAccessControlPolicy dest_policy;
   const char *if_mod;
   const char *if_unmod;
-  const char *if_match;
-  const char *if_nomatch;
+  const char *if_match{nullptr};
+  const char *if_nomatch{nullptr};
   // Required or it is not a copy operation
   std::string_view copy_source;
   // Not actually required
   std::optional<std::string_view> md_directive;
+  std::map<std::string, std::string> crypt_http_responses;
 
   off_t ofs;
   off_t len;
@@ -1603,6 +1640,17 @@ protected:
   //object lock
   RGWObjectRetention *obj_retention;
   RGWObjectLegalHold *obj_legal_hold;
+
+  // remote copy progress helper
+  struct ProgressTracker {
+    std::mutex mtx;
+    std::condition_variable cv;
+    std::queue<off_t> ofs_queue;
+    std::atomic<bool> done{false};
+
+    ProgressTracker() {}
+  };
+  std::optional<ProgressTracker> progress_tracker;
 
   int init_common();
 
@@ -1644,6 +1692,13 @@ public:
   void pre_exec() override;
   void execute(optional_yield y) override;
   void progress_cb(off_t ofs);
+  void progress_cb_handler();
+  ProgressTracker& get_progress_tracker() {
+    if (!progress_tracker) {
+      progress_tracker.emplace();
+    }
+    return *progress_tracker;
+  }
 
   virtual int check_storage_class(const rgw_placement_rule& src_placement) {
     return 0;
@@ -1929,6 +1984,39 @@ public:
   uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
 };
 
+class RGWPutBucketOwnershipControls : public RGWOp {
+ protected:
+  rgw::s3::OwnershipControls ownership;
+  bufferlist data;
+ public:
+  virtual int get_params(optional_yield y) = 0;
+  int verify_permission(optional_yield y) override;
+  void execute(optional_yield y) override;
+  const char* name() const override { return "put_bucket_ownership_controls"; }
+  RGWOpType get_type() override { return RGW_OP_PUT_BUCKET_OWNERSHIP_CONTROLS; }
+  uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
+};
+
+class RGWGetBucketOwnershipControls : public RGWOp {
+ protected:
+  rgw::s3::OwnershipControls ownership;
+ public:
+  int verify_permission(optional_yield y) override;
+  void execute(optional_yield y) override;
+  const char* name() const override { return "get_bucket_ownership_controls"; }
+  RGWOpType get_type() override { return RGW_OP_GET_BUCKET_OWNERSHIP_CONTROLS; }
+  uint32_t op_mask() override { return RGW_OP_TYPE_READ; }
+};
+
+class RGWDeleteBucketOwnershipControls : public RGWOp {
+ public:
+  int verify_permission(optional_yield y) override;
+  void execute(optional_yield y) override;
+  const char* name() const override { return "delete_bucket_ownership_controls"; }
+  RGWOpType get_type() override { return RGW_OP_DELETE_BUCKET_OWNERSHIP_CONTROLS; }
+  uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
+};
+
 class RGWGetRequestPayment : public RGWOp {
 protected:
   bool requester_pays;
@@ -2011,6 +2099,8 @@ protected:
   std::optional<rgw::cksum::Cksum> cksum;
   std::optional<std::string> armored_cksum;
   off_t ofs = 0;
+  const char *if_match{nullptr};
+  const char *if_nomatch{nullptr};
 
 public:
   RGWCompleteMultipart() {}
@@ -2166,13 +2256,21 @@ public:
   }
 };
 
-
 class RGWDeleteMultiObj : public RGWOp {
   /**
    * Handles the deletion of an individual object and uses
    * set_partial_response to record the outcome.
    */
-  void handle_individual_object(const rgw_obj_key& o, optional_yield y);
+  void handle_individual_object(const RGWMultiDelObject& object,
+                                optional_yield y,
+                                const bool skip_olh_obj_update = false);
+
+  void handle_versioned_objects(const std::vector<RGWMultiDelObject>& objects,
+                                uint32_t max_aio, boost::asio::yield_context yield);
+  void handle_non_versioned_objects(const std::vector<RGWMultiDelObject>& objects,
+                                    uint32_t max_aio, boost::asio::yield_context yield);
+  void handle_objects(const std::vector<RGWMultiDelObject>& objects,
+                      uint32_t max_aio, boost::asio::yield_context yield);
 
 protected:
   std::vector<delete_multi_obj_entry> ops_log_entries;
@@ -2227,8 +2325,7 @@ extern int rgw_build_bucket_policies(const DoutPrefixProvider *dpp, rgw::sal::Dr
 				     req_state* s, optional_yield y);
 extern int rgw_build_object_policies(const DoutPrefixProvider *dpp, rgw::sal::Driver* driver,
 				     req_state *s, bool prefetch_data, optional_yield y);
-extern void rgw_build_iam_environment(rgw::sal::Driver* driver,
-				      req_state* s);
+extern void rgw_build_iam_environment(req_state* s);
 
 inline int get_system_versioning_params(req_state *s,
 					uint64_t *olh_epoch,
@@ -2298,6 +2395,9 @@ inline int rgw_get_request_metadata(const DoutPrefixProvider *dpp,
       "x-amz-server-side-encryption-customer-algorithm",
       "x-amz-server-side-encryption-customer-key",
       "x-amz-server-side-encryption-customer-key-md5",
+      "x-amz-copy-source-server-side-encryption-customer-algorithm",
+      "x-amz-copy-source-server-side-encryption-customer-key",
+      "x-amz-copy-source-server-side-encryption-customer-key-md5",
       /* XXX agreed w/cbodley that probably a cleanup is needed here--we probably
        * don't want to store these, esp. under user.rgw */
       "x-amz-storage-class",
@@ -2802,3 +2902,12 @@ int rgw_policy_from_attrset(const DoutPrefixProvider *dpp,
                             CephContext *cct,
                             std::map<std::string, bufferlist>& attrset,
                             RGWAccessControlPolicy *policy);
+
+int get_decrypt_filter(
+  std::unique_ptr<RGWGetObj_Filter>* filter,
+  RGWGetObj_Filter* cb,
+  req_state* s,
+  std::map<std::string, bufferlist>& attrs,
+  bufferlist* manifest_bl,
+  std::map<std::string, std::string>* crypt_http_responses,
+  bool copy_source);

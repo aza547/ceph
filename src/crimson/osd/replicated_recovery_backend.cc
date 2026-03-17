@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
-// vim: ts=8 sw=2 smarttab expandtab
+// vim: ts=8 sw=2 sts=2 expandtab expandtab
 
 #include <fmt/format.h>
 #include <fmt/ostream.h>
@@ -132,29 +132,37 @@ ReplicatedRecoveryBackend::maybe_pull_missing_obj(
     using prepare_pull_iertr =
       crimson::osd::ObjectContextLoader::load_obc_iertr::extend<
         crimson::ct_error::eagain>;
-    return pg.obc_loader.with_obc<RWState::RWREAD>(soid.get_head(),
-      [this, soid, need](auto head, auto) {
-      PullOp pull_op;
-      auto& recovery_waiter = get_recovering(soid);
-      recovery_waiter.pull_info =
-        std::make_optional<RecoveryBackend::pull_info_t>();
-      auto& pull_info = *recovery_waiter.pull_info;
-      prepare_pull(head, pull_op, pull_info, soid, need);
-      auto msg = crimson::make_message<MOSDPGPull>();
-      msg->from = pg.get_pg_whoami();
-      msg->set_priority(pg.get_recovery_op_priority());
-      msg->pgid = pg.get_pgid();
-      msg->map_epoch = pg.get_osdmap_epoch();
-      msg->min_epoch = pg.get_last_peering_reset();
-      msg->set_pulls({std::move(pull_op)});
-      return shard_services.send_to_osd(
-        pull_info.from.osd,
-        std::move(msg),
-        pg.get_osdmap_epoch());
-    }).si_then([this, soid]() -> prepare_pull_iertr::future<> {
-      auto& recovery_waiter = get_recovering(soid);
-      return recovery_waiter.wait_for_pull();
-    });
+
+    return seastar::do_with(
+      PullOp{},
+      [this, soid, need](PullOp &pull_op) {
+        return pg.obc_loader.with_obc<RWState::RWREAD>(soid.get_head(),
+          [this, soid, need, &pull_op](auto head, auto) {
+          auto& recovery_waiter = get_recovering(soid);
+          recovery_waiter.pull_info.emplace();
+          auto &pull_info = *recovery_waiter.pull_info;
+          prepare_pull(head, pull_op, pull_info, soid, need);
+          return seastar::now();
+        }).si_then([this, soid, &pull_op]() {
+            auto& recovery_waiter = get_recovering(soid);
+            auto &pull_info = *recovery_waiter.pull_info;
+            auto msg = crimson::make_message<MOSDPGPull>();
+            msg->from = pg.get_pg_whoami();
+            msg->set_priority(pg.get_recovery_op_priority());
+            msg->pgid = pg.get_pgid();
+            msg->map_epoch = pg.get_osdmap_epoch();
+            msg->min_epoch = pg.get_last_peering_reset();
+            msg->set_pulls({std::move(pull_op)});
+            return shard_services.send_to_osd(
+              pull_info.from.osd,
+              std::move(msg),
+              pg.get_osdmap_epoch()
+            ).then([this, soid]() -> prepare_pull_iertr::future<> {
+                auto& recovery_waiter = get_recovering(soid);
+                return recovery_waiter.wait_for_pull();
+              });
+           });
+       });
   }).handle_error_interruptible(
     crimson::ct_error::assert_all(fmt::format(
       "{} {} error with {} need {} ", pg, FNAME, soid, need).c_str())
@@ -237,7 +245,9 @@ ReplicatedRecoveryBackend::on_local_recover_persist(
       soid, _recovery_info, is_delete, t
     ).then_interruptible([FNAME, this, &t] {
       DEBUGDPP("submitting transaction", pg);
-      return shard_services.get_store().do_transaction(coll, std::move(t));
+      return crimson::os::with_store_do_transaction(
+        shard_services.get_store(pg.get_store_index()),
+        coll, std::move(t));
     }).then_interruptible(
       [this, epoch_frozen, last_complete = pg.get_info().last_complete] {
       pg.get_recovery_handler()->_committed_pushed_object(epoch_frozen, last_complete);
@@ -264,8 +274,10 @@ ReplicatedRecoveryBackend::local_recover_delete(
         }).then_interruptible(
 	  [FNAME, this, &txn]() mutable {
 	  DEBUGDPP("submitting transaction", pg);
-	  return shard_services.get_store().do_transaction(coll,
-							   std::move(txn));
+	  return crimson::os::with_store_do_transaction(
+      shard_services.get_store(pg.get_store_index()),
+      coll,
+      std::move(txn));
 	});
       });
     }
@@ -607,7 +619,8 @@ ReplicatedRecoveryBackend::read_metadata_for_push_op(
 	  return seastar::make_ready_future<bufferlist>();
 	})),
       interruptor::make_interruptible(
-        store->get_attrs(coll, ghobject_t(oid), CEPH_OSD_OP_FLAG_FADVISE_DONTNEED)
+        crimson::os::with_store<&crimson::os::FuturizedStore::Shard::get_attrs>(
+          store, coll, ghobject_t(oid), CEPH_OSD_OP_FLAG_FADVISE_DONTNEED)
       ).handle_error_interruptible<false>(
 	crimson::os::FuturizedStore::Shard::get_attrs_ertr::all_same_way(
 	  [FNAME, this, oid] (const std::error_code& e) {
@@ -671,10 +684,11 @@ ReplicatedRecoveryBackend::read_object_for_push_op(
     // 3. read the truncated extents
     // TODO: check if the returned extents are pruned
     return interruptor::make_interruptible(
-      store->readv(
+      crimson::os::with_store<&crimson::os::FuturizedStore::Shard::readv>(
+        store,
         coll,
         ghobject_t{oid},
-        push_op->data_included,
+        std::ref(push_op->data_included),
         CEPH_OSD_OP_FLAG_FADVISE_DONTNEED));
   }).safe_then_interruptible([push_op, range_end=copy_subset.range_end()](auto &&bl) {
     push_op->data.claim_append(std::move(bl));
@@ -718,42 +732,44 @@ ReplicatedRecoveryBackend::read_omap_for_push_op(
     PushOp* push_op)
 {
   if (progress.omap_complete) {
-    return seastar::make_ready_future<>();
+    co_return;
   }
-  return seastar::repeat([&new_progress, &max_len, push_op, &oid, this] {
-    return shard_services.get_store().omap_get_values(
-      coll, ghobject_t{oid}, nullopt_if_empty(new_progress.omap_recovered_to)
-    ).safe_then([&new_progress, &max_len, push_op](const auto& ret) {
-      const auto& [done, kvs] = ret;
-      bool stop = done;
-      // assuming "values.empty() only if done" holds here!
-      for (const auto& [key, value] : kvs) {
-        if (is_too_many_entries_per_chunk(push_op)) {
-          stop = true;
-          break;
-        }
-        if (const uint64_t entry_size = key.size() + value.length();
-            entry_size > max_len) {
-          stop = true;
-          break;
-        } else {
-          max_len -= std::min(max_len, entry_size);
-        }
-        push_op->omap_entries.emplace(key, value);
-      }
-      if (!push_op->omap_entries.empty()) {
-        // we iterate in order
-        new_progress.omap_recovered_to = std::rbegin(push_op->omap_entries)->first;
-      }
-      if (done) {
+
+  ObjectStore::omap_iter_seek_t start_from;
+  start_from.seek_position = new_progress.omap_recovered_to.empty() ?
+                             std::string{} : new_progress.omap_recovered_to;
+  start_from.seek_type = ObjectStore::omap_iter_seek_t::UPPER_BOUND;
+
+  std::function<ObjectStore::omap_iter_ret_t(std::string_view, std::string_view)> callback =
+    [&max_len, push_op] (std::string_view key, std::string_view value)
+  {
+    uint64_t entry_size = key.size() + value.length();
+    if (is_too_many_entries_per_chunk(push_op) || entry_size > max_len) {
+      return ObjectStore::omap_iter_ret_t::STOP;
+    }
+
+    max_len -= std::min(max_len, entry_size);
+    ceph::bufferlist bl;
+    bl.append(value);
+    push_op->omap_entries.emplace(key, bl);
+    return ObjectStore::omap_iter_ret_t::NEXT;
+  };
+
+  co_await interruptor::make_interruptible(
+    crimson::os::with_store<&crimson::os::FuturizedStore::Shard::omap_iterate>(
+      shard_services.get_store(pg.get_store_index()),
+      coll, ghobject_t{oid}, start_from, callback, 0
+    ).safe_then([&new_progress](auto ret) {
+      if (ret == ObjectStore::omap_iter_ret_t::NEXT) {
         new_progress.omap_complete = true;
+      } else {
+        new_progress.omap_complete = false;
       }
-      return seastar::make_ready_future<seastar::stop_iteration>(
-        stop ? seastar::stop_iteration::yes : seastar::stop_iteration::no
-      );
-    }, crimson::os::FuturizedStore::Shard::read_errorator::assert_all(fmt::format(
-         "{} ReplicatedRecoveryBackend::read_omap_for_push_op error with {}", pg, oid).c_str()));
-  });
+    }).handle_error(
+      crimson::os::FuturizedStore::Shard::read_errorator::assert_all(fmt::format(
+        "{} ReplicatedRecoveryBackend::read_omap_for_push_op error with {}", pg, oid).c_str())
+    )
+  );
 }
 
 std::vector<pg_shard_t>
@@ -905,14 +921,18 @@ ReplicatedRecoveryBackend::_handle_pull_response(
     );
     DEBUGDPP("submitting transaction, complete", pg);
     co_await interruptor::make_interruptible(
-      shard_services.get_store().do_transaction(coll, std::move(t)));
+      crimson::os::with_store_do_transaction(
+        shard_services.get_store(pg.get_store_index()),
+        coll, std::move(t)));
   } else {
     response->soid = push_op.soid;
     response->recovery_info = pull_info.recovery_info;
     response->recovery_progress = pull_info.recovery_progress;
     DEBUGDPP("submitting transaction, incomplete", pg);
     co_await interruptor::make_interruptible(
-      shard_services.get_store().do_transaction(coll, std::move(t)));
+      crimson::os::with_store_do_transaction(
+        shard_services.get_store(pg.get_store_index()),
+        coll, std::move(t)));
   }
 
   co_return complete;
@@ -1030,14 +1050,17 @@ ReplicatedRecoveryBackend::handle_push(
       false, t);
 
     co_await interruptor::make_interruptible(
-      shard_services.get_store().do_transaction(coll, std::move(t)));
+      crimson::os::with_store_do_transaction(
+        shard_services.get_store(pg.get_store_index()),
+        coll, std::move(t)));
     replica_push_targets.erase(ptiter);
 
     pg.get_recovery_handler()->_committed_pushed_object(
       epoch_frozen, pg.get_info().last_complete);
   } else {
     co_await interruptor::make_interruptible(
-      shard_services.get_store().do_transaction(coll, std::move(t)));
+      crimson::os::with_store_do_transaction(
+        shard_services.get_store(pg.get_store_index()), coll, std::move(t)));
   }
 
   auto reply = crimson::make_message<MOSDPGPushReply>();
@@ -1213,7 +1236,8 @@ ReplicatedRecoveryBackend::prep_push_target(
 
   // clone overlap content in local object if using a new object
   auto st = co_await interruptor::make_interruptible(
-    store->stat(coll, ghobject_t(recovery_info.soid)));
+    crimson::os::with_store<&crimson::os::FuturizedStore::Shard::stat>(
+      store, coll, ghobject_t(recovery_info.soid), 0));
 
   // TODO: pg num bytes counting
   uint64_t local_size = std::min(recovery_info.size, (uint64_t)st.st_size);

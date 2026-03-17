@@ -1,4 +1,5 @@
 import { CephServicePlacement } from '~/app/shared/models/service.interface';
+import { USER } from '~/app/shared/constants/app.constants';
 
 export interface SMBCluster {
   resource_type: typeof CLUSTER_RESOURCE;
@@ -27,12 +28,13 @@ interface SMBCephfs {
   subvolumegroup?: string;
   subvolume?: string;
   provider?: string;
+  qos?: SMBShareQoS;
 }
 
 interface SMBShareLoginControl {
   name: string;
   access: 'read' | 'read-write' | 'none' | 'admin';
-  category?: 'user' | 'group';
+  category?: typeof USER | 'group';
 }
 
 export interface Filesystem {
@@ -67,14 +69,23 @@ export const RESOURCE = {
 };
 
 export const AUTHMODE = {
-  User: 'user',
-  activeDirectory: 'active-directory'
+  User: USER,
+  ActiveDirectory: 'active-directory'
 };
 
 export const PLACEMENT = {
   host: 'hosts',
   label: 'label'
 };
+
+export interface SMBShareQoS {
+  read_iops_limit?: number;
+  write_iops_limit?: number;
+  read_bw_limit?: number;
+  write_bw_limit?: number;
+  read_delay_max?: number;
+  write_delay_max?: number;
+}
 
 export interface SMBShare {
   resource_type: string;
@@ -87,20 +98,6 @@ export interface SMBShare {
   browseable?: boolean;
   restrict_access?: boolean;
   login_control?: SMBShareLoginControl;
-}
-
-interface SMBCephfs {
-  volume: string;
-  path: string;
-  subvolumegroup?: string;
-  subvolume?: string;
-  provider?: string;
-}
-
-interface SMBShareLoginControl {
-  name: string;
-  access: 'read' | 'read-write' | 'none' | 'admin';
-  category?: 'user' | 'group';
 }
 
 export interface SMBJoinAuth {

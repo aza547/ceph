@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include <fmt/format.h>
 #include <fmt/ostream.h>
@@ -123,12 +123,12 @@ size_t PGRecovery::start_primary_recovery_ops(
   unsigned started = 0;
   int skipped = 0;
 
-  map<version_t, hobject_t>::const_iterator p =
-    missing.get_rmissing().lower_bound(pg->get_peering_state().get_pg_log().get_log().last_requested);
+  map<eversion_t, hobject_t>::const_iterator p =
+    missing.get_rmissing().lower_bound(eversion_t(0, pg->get_peering_state().get_pg_log().get_log().last_requested));
   while (started < max_to_start && p != missing.get_rmissing().end()) {
     // TODO: chain futures here to enable yielding to scheduler?
     hobject_t soid;
-    version_t v = p->first;
+    eversion_t v = p->first;
 
     auto it_objects = pg->get_peering_state().get_pg_log().get_log().objects.find(p->second);
     if (it_objects != pg->get_peering_state().get_pg_log().get_log().objects.end()) {
@@ -190,7 +190,7 @@ size_t PGRecovery::start_primary_recovery_ops(
     }
 
     if (!skipped)
-      pg->get_peering_state().set_last_requested(v);
+      pg->get_peering_state().set_last_requested(v.version);
   }
 
   DEBUGDPP("started {} skipped {}", pg->get_dpp(), started, skipped);
@@ -519,7 +519,7 @@ PGRecovery::recover_object_with_throttle(
   auto releaser = co_await interruptor::make_interruptible(
     pg->get_shard_services().get_throttle(
       crimson::osd::scheduler::params_t{
-	1, 0, crimson::osd::scheduler::scheduler_class_t::background_best_effort
+	1, 0, 0, SchedulerClass::background_best_effort
       }));
   DEBUGDPP("got throttle: {} {}", pg->get_dpp(), soid, need);
   co_await pg->get_recovery_backend()->recover_object(soid, need);

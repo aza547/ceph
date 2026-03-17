@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -84,7 +85,7 @@ struct osd_info_t {
   void dump(ceph::Formatter *f) const;
   void encode(ceph::buffer::list& bl) const;
   void decode(ceph::buffer::list::const_iterator& bl);
-  static void generate_test_instances(std::list<osd_info_t*>& o);
+  static std::list<osd_info_t> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(osd_info_t)
 
@@ -105,7 +106,7 @@ struct osd_xinfo_t {
   void dump(ceph::Formatter *f) const;
   void encode(ceph::buffer::list& bl, uint64_t features) const;
   void decode(ceph::buffer::list::const_iterator& bl);
-  static void generate_test_instances(std::list<osd_xinfo_t*>& o);
+  static std::list<osd_xinfo_t> generate_test_instances();
 };
 WRITE_CLASS_ENCODER_FEATURES(osd_xinfo_t)
 
@@ -346,11 +347,13 @@ struct PGTempMap {
       f->close_section();
     }
   }
-  static void generate_test_instances(std::list<PGTempMap*>& o) {
-    o.push_back(new PGTempMap);
-    o.push_back(new PGTempMap);
-    o.back()->set(pg_t(1, 2), { 3, 4 });
-    o.back()->set(pg_t(2, 3), { 4, 5 });
+  static std::list<PGTempMap> generate_test_instances() {
+    std::list<PGTempMap> o;
+    o.emplace_back();
+    o.emplace_back();
+    o.back().set(pg_t(1, 2), { 3, 4 });
+    o.back().set(pg_t(2, 3), { 4, 5 });
+    return o;
   }
 };
 WRITE_CLASS_ENCODER(PGTempMap)
@@ -453,7 +456,7 @@ public:
     void decode_classic(ceph::buffer::list::const_iterator &p);
     void decode(ceph::buffer::list::const_iterator &bl);
     void dump(ceph::Formatter *f) const;
-    static void generate_test_instances(std::list<Incremental*>& o);
+    static std::list<Incremental> generate_test_instances();
 
     explicit Incremental(epoch_t e=0) :
       encode_features(0),
@@ -1134,16 +1137,21 @@ public:
    */
   uint64_t get_up_osd_features() const;
 
+  int get_num_pg_upmap_primaries() const { return pg_upmap_primaries.size(); };
   void get_upmap_pgs(std::vector<pg_t> *upmap_pgs) const;
   bool check_pg_upmaps(
     CephContext *cct,
     const std::vector<pg_t>& to_check,
     std::vector<pg_t> *to_cancel,
+    std::vector<pg_t> *to_cancel_upmap_primary_only,
+    std::set<uint64_t> *affected_pools,
     std::map<pg_t, mempool::osdmap::vector<std::pair<int,int>>> *to_remap) const;
   void clean_pg_upmaps(
     CephContext *cct,
     Incremental *pending_inc,
     const std::vector<pg_t>& to_cancel,
+    const std::vector<pg_t>& to_cancel_upmap_primary_only,
+    const std::set<uint64_t>& affected_pools,
     const std::map<pg_t, mempool::osdmap::vector<std::pair<int,int>>>& to_remap) const;
   bool clean_pg_upmaps(CephContext *cct, Incremental *pending_inc) const;
 
@@ -1519,10 +1527,13 @@ public:
     OSDMap& tmp_osd_map,
     const std::optional<rb_policy>& rbp = std::nullopt) const;
 
-  void rm_all_upmap_prims(CephContext *cct, Incremental *pending_inc, uint64_t pid); // per pool
   void rm_all_upmap_prims(
     CephContext *cct,
-    OSDMap::Incremental *pending_inc); // total
+    Incremental *pending_inc,
+    uint64_t pid) const; // per pool
+  void rm_all_upmap_prims(
+    CephContext *cct,
+    OSDMap::Incremental *pending_inc) const; // total
 
   int calc_desired_primary_distribution(
     CephContext *cct,
@@ -1849,7 +1860,7 @@ public:
   void dump_osds(ceph::Formatter *f) const;
   void dump_pool(CephContext *cct, int64_t pid, const pg_pool_t &pdata, ceph::Formatter *f) const;
   void dump_read_balance_score(CephContext *cct, int64_t pid, const pg_pool_t &pdata, ceph::Formatter *f) const;
-  static void generate_test_instances(std::list<OSDMap*>& o);
+  static std::list<OSDMap> generate_test_instances();
   bool check_new_blocklist_entries() const { return new_blocklist_entries; }
 
   void check_health(CephContext *cct, health_check_map_t *checks) const;

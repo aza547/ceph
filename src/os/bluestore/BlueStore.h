@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -59,6 +60,9 @@
 #include "BlueFS.h"
 #include "common/EventTrace.h"
 #include "common/admin_socket.h"
+#ifdef WITH_CPUTRACE
+#include "common/cputrace.h"
+#endif
 
 #ifdef WITH_BLKIN
 #include "common/zipkin_trace.h"
@@ -70,7 +74,10 @@ class BlueStoreRepairer;
 class SimpleBitmap;
 //#define DEBUG_CACHE
 //#define DEBUG_DEFERRED
-
+#ifdef WITH_CPUTRACE
+//change to #define to enable
+#undef BLUESTORE_COMMON_CPUTRACE
+#endif
 // constants for Buffer::optimize()
 #define MAX_BUFFER_SLOP_RATIO_DEN  8  // so actually 1/N
 #define CEPH_BLUESTORE_TOOL_RESTORE_ALLOCATION
@@ -81,6 +88,7 @@ enum {
   //****************************************
   l_bluestore_allocated,
   l_bluestore_stored,
+  l_bluestore_omap,
   l_bluestore_fragmentation,
   l_bluestore_alloc_unit,
   //****************************************
@@ -638,8 +646,6 @@ public:
     void dump(CephContext *cct);
   };
 
-//#define CACHE_BLOB_BL  // not sure if this is a win yet or not... :/
-
   /// in-memory blob metadata and associated cached buffers (if any)
   struct Blob {
     MEMPOOL_CLASS_HELPERS();
@@ -660,9 +666,6 @@ public:
   private:
     SharedBlobRef shared_blob;      ///< shared blob state (if any)
     mutable bluestore_blob_t blob;  ///< decoded blob metadata
-#ifdef CACHE_BLOB_BL
-    mutable ceph::buffer::list blob_bl;     ///< cached encoded blob, blob is dirty if empty
-#endif
     /// refs from this shard.  ephemeral if id<0, persisted if spanning.
     bluestore_blob_use_tracker_t used_in_blob;
 
@@ -731,9 +734,6 @@ public:
     void dup(Blob& o) {
       o.set_shared_blob(shared_blob);
       o.blob = blob;
-#ifdef CACHE_BLOB_BL
-      o.blob_bl = blob_bl;
-#endif
     }
     void add_tail(uint32_t new_blob_size, uint32_t min_release_size);
     void dup(const Blob& from, bool copy_used_in_blob);
@@ -747,9 +747,6 @@ public:
       return blob;
     }
     inline bluestore_blob_t& dirty_blob() {
-#ifdef CACHE_BLOB_BL
-      blob_bl.clear();
-#endif
       return blob;
     }
 
@@ -772,6 +769,10 @@ public:
       ++nref;
     }
     void put() {
+      if (nref.load(std::memory_order_acquire) == 1) {
+        delete this;
+        return;
+      }
       if (--nref == 0)
 	delete this;
     }
@@ -790,46 +791,6 @@ public:
 
     ~Blob();
 
-#ifdef CACHE_BLOB_BL
-    void _encode() const {
-      if (blob_bl.length() == 0 ) {
-	encode(blob, blob_bl);
-      } else {
-	ceph_assert(blob_bl.length());
-      }
-    }
-    void bound_encode(
-      size_t& p,
-      bool include_ref_map) const {
-      _encode();
-      p += blob_bl.length();
-      if (include_ref_map) {
-	used_in_blob.bound_encode(p);
-      }
-    }
-    void encode(
-      ceph::buffer::list::contiguous_appender& p,
-      bool include_ref_map) const {
-      _encode();
-      p.append(blob_bl);
-      if (include_ref_map) {
-	used_in_blob.encode(p);
-      }
-    }
-    void decode(
-      ceph::buffer::ptr::const_iterator& p,
-      bool include_ref_map,
-      Collection */*coll*/) {
-      const char *start = p.get_pos();
-      denc(blob, p);
-      const char *end = p.get_pos();
-      blob_bl.clear();
-      blob_bl.append(start, end - start);
-      if (include_ref_map) {
-	used_in_blob.decode(p);
-      }
-    }
-#else
     void bound_encode(
       size_t& p,
       uint64_t struct_v,
@@ -862,7 +823,6 @@ public:
       uint64_t* sbid,
       bool include_ref_map,
       Collection *coll);
-#endif
   };
   typedef boost::intrusive_ptr<Blob> BlobRef;
   typedef mempool::bluestore_cache_meta::map<int,BlobRef> blob_map_t;
@@ -1111,6 +1071,23 @@ public:
       bool just_after_reshard //true to indicate that update should now respect shard boundaries
     );                        //as no further resharding will be done
     decltype(BlueStore::Blob::id) allocate_spanning_blob_id();
+
+    struct ReshardPlan {
+      std::vector<bluestore_onode_t::shard_info> new_shard_info;
+      unsigned shard_index_begin;
+      unsigned shard_index_end;
+      uint32_t spanning_scan_begin;
+      uint32_t spanning_scan_end;
+    };
+
+    ReshardPlan reshard_decision(uint32_t segment_size);
+
+    void reshard_action(
+      ReshardPlan& plan,
+      KeyValueDB *db,
+      KeyValueDB::Transaction t);
+
+
     void reshard(
       KeyValueDB *db,
       KeyValueDB::Transaction t,
@@ -3217,9 +3194,12 @@ public:
   int expand_devices(std::ostream& out);
   std::string get_device_path(unsigned id);
 
+  bool get_db_sharding(std::string& res_sharding);
+
   int dump_bluefs_sizes(std::ostream& out);
   void trim_free_space(const std::string& type, std::ostream& outss);
   static int zap_device(CephContext* cct, const std::string& dev);
+
 
 public:
   int statfs(struct store_statfs_t *buf,
@@ -3417,13 +3397,6 @@ public:
     const ghobject_t &oid,   ///< [in] Object containing omap
     ceph::buffer::list *header,      ///< [out] omap header
     bool allow_eio = false ///< [in] don't assert on eio
-    ) override;
-
-  /// Get keys defined on oid
-  int omap_get_keys(
-    CollectionHandle &c,              ///< [in] Collection containing oid
-    const ghobject_t &oid, ///< [in] Object containing omap
-    std::set<std::string> *keys      ///< [out] Keys defined on oid
     ) override;
 
   /// Get key values
@@ -4182,6 +4155,13 @@ public:
                           const std::vector<std::string>& devs,
 			  std::vector<uint64_t>* valid_positions,
 			  bool force);
+
+#ifdef BLUESTORE_COMMON_CPUTRACE
+  static cpucounter_group cputrace_bluestore;
+#define BLUE_SCOPE(y) MEASURE_SCOPE(cputrace_bluestore, y)
+#else //BLUESTORE_COMMON_CPUTRACE
+#define BLUE_SCOPE(y)
+#endif //BLUESTORE_COMMON_CPUTRACE
 };
 
 inline std::ostream& operator<<(std::ostream& out, const BlueStore::volatile_statfs& s) {
@@ -4431,202 +4411,6 @@ private:
   // non-shared extents with multiple references
   fsck_interval misreferenced_extents;
 
-};
-
-class RocksDBBlueFSVolumeSelector : public BlueFSVolumeSelector
-{
-  template <class T, size_t MaxX, size_t MaxY>
-  class matrix_2d {
-    T values[MaxX][MaxY];
-  public:
-    matrix_2d() {
-      clear();
-    }
-    T& at(size_t x, size_t y) {
-      ceph_assert(x < MaxX);
-      ceph_assert(y < MaxY);
-
-      return values[x][y];
-    }
-    size_t get_max_x() const {
-      return MaxX;
-    }
-    size_t get_max_y() const {
-      return MaxY;
-    }
-    void clear() {
-      memset(values, 0, sizeof(values));
-    }
-  };
-
-  enum {
-    // use 0/nullptr as unset indication
-    LEVEL_FIRST = 1,
-    LEVEL_LOG = LEVEL_FIRST, // BlueFS log
-    LEVEL_WAL,
-    LEVEL_DB,
-    LEVEL_SLOW,
-    LEVEL_MAX
-  };
-  // add +1 row for per-level actual (taken from file size) total
-  // add +1 column for corresponding per-device totals
-  typedef matrix_2d<std::atomic<uint64_t>, BlueFS::MAX_BDEV + 1, LEVEL_MAX - LEVEL_FIRST + 1> per_level_per_dev_usage_t;
-
-  per_level_per_dev_usage_t per_level_per_dev_usage;
-  // file count per level, add +1 to keep total file count
-  std::atomic<uint64_t> per_level_files[LEVEL_MAX - LEVEL_FIRST + 1] = { 0 };
-
-  // Note: maximum per-device totals below might be smaller than corresponding
-  // perf counters by up to a single alloc unit (1M) due to superblock extent.
-  // The later is not accounted here.
-  per_level_per_dev_usage_t per_level_per_dev_max;
-
-  uint64_t l_totals[LEVEL_MAX - LEVEL_FIRST];
-  uint64_t db_avail4slow = 0;
-  uint64_t level0_size = 0;
-  uint64_t level_base = 0;
-  uint64_t level_multiplier = 0;
-  size_t extra_level = 0;
-  enum {
-    OLD_POLICY,
-    USE_SOME_EXTRA
-  };
-
-public:
-  RocksDBBlueFSVolumeSelector(
-    uint64_t _wal_total,
-    uint64_t _db_total,
-    uint64_t _slow_total,
-    uint64_t _level0_size,
-    uint64_t _level_base,
-    uint64_t _level_multiplier,
-    double reserved_factor,
-    uint64_t reserved,
-    bool new_pol)
-  {
-    l_totals[LEVEL_LOG - LEVEL_FIRST] = 0; // not used at the moment
-    l_totals[LEVEL_WAL - LEVEL_FIRST] = _wal_total;
-    l_totals[LEVEL_DB - LEVEL_FIRST] = _db_total;
-    l_totals[LEVEL_SLOW - LEVEL_FIRST] = _slow_total;
-
-    if (!new_pol) {
-      return;
-    }
-    // Calculating how much extra space is available at DB volume.
-    // Depending on the presence of explicit reserved size specification it might be either
-    // * DB volume size - reserved
-    // or
-    // * DB volume size - sum_max_level_size(0, L-1) - max_level_size(L) * reserved_factor
-    if (!reserved) {
-      level0_size = _level0_size;
-      level_base = _level_base;
-      level_multiplier = _level_multiplier;
-      uint64_t prev_levels = _level0_size;
-      uint64_t cur_level = _level_base;
-      extra_level = 1;
-      do {
-	uint64_t next_level = cur_level * _level_multiplier;
-        uint64_t next_threshold = prev_levels + cur_level + next_level;
-        ++extra_level;
-        if (_db_total <= next_threshold) {
-	  uint64_t cur_threshold = prev_levels + cur_level * reserved_factor;
-          db_avail4slow = cur_threshold < _db_total ? _db_total - cur_threshold : 0;
-          break;
-        } else {
-          prev_levels += cur_level;
-          cur_level = next_level;
-        }
-      } while (true);
-    } else {
-      db_avail4slow = reserved < _db_total ? _db_total - reserved : 0;
-      extra_level = 0;
-    }
-  }
-
-  uint64_t get_available_extra() const {
-    return db_avail4slow;
-  }
-  uint64_t get_extra_level() const {
-    return extra_level;
-  }
-  void* get_hint_for_log() const override {
-    return  reinterpret_cast<void*>(LEVEL_LOG);
-  }
-  void* get_hint_by_dir(std::string_view dirname) const override;
-
-  void add_usage(void* hint, const bluefs_extent_t& extent) override {
-    if (hint == nullptr)
-      return;
-    size_t pos = (size_t)hint - LEVEL_FIRST;
-    auto& cur = per_level_per_dev_usage.at(extent.bdev, pos);
-    auto& max = per_level_per_dev_max.at(extent.bdev, pos);
-    uint64_t v = cur.fetch_add(extent.length) + extent.length;
-    while (v > max) {
-      max.exchange(v);
-    }
-    {
-      //update per-device totals
-      auto& cur = per_level_per_dev_usage.at(extent.bdev, LEVEL_MAX - LEVEL_FIRST);
-      auto& max = per_level_per_dev_max.at(extent.bdev, LEVEL_MAX - LEVEL_FIRST);
-      uint64_t v = cur.fetch_add(extent.length) + extent.length;
-      while (v > max) {
-	max.exchange(v);
-      }
-    }
-  }
-  void sub_usage(void* hint, const bluefs_extent_t& extent) override {
-    if (hint == nullptr)
-      return;
-    size_t pos = (size_t)hint - LEVEL_FIRST;
-    auto& cur = per_level_per_dev_usage.at(extent.bdev, pos);
-    ceph_assert(cur >= extent.length);
-    cur -= extent.length;
-
-    //update per-device totals
-    auto& cur2 = per_level_per_dev_usage.at(extent.bdev, LEVEL_MAX - LEVEL_FIRST);
-    ceph_assert(cur2 >= extent.length);
-    cur2 -= extent.length;
-  }
-  void add_usage(void* hint, uint64_t size_more, bool upd_files) override {
-    if (hint == nullptr)
-      return;
-    size_t pos = (size_t)hint - LEVEL_FIRST;
-    //update per-level actual totals
-    auto& cur = per_level_per_dev_usage.at(BlueFS::MAX_BDEV, pos);
-    auto& max = per_level_per_dev_max.at(BlueFS::MAX_BDEV, pos);
-    uint64_t v = cur.fetch_add(size_more) + size_more;
-    while (v > max) {
-      max.exchange(v);
-    }
-    if (upd_files) {
-      ++per_level_files[pos];
-      ++per_level_files[LEVEL_MAX - LEVEL_FIRST];
-    }
-  }
-  void sub_usage(void* hint, uint64_t size_less, bool upd_files) override {
-    if (hint == nullptr)
-      return;
-    size_t pos = (size_t)hint - LEVEL_FIRST;
-    //update per-level actual totals
-    auto& cur = per_level_per_dev_usage.at(BlueFS::MAX_BDEV, pos);
-    ceph_assert(cur >= size_less);
-    cur -= size_less;
-    if (upd_files) {
-      ceph_assert(per_level_files[pos] > 0);
-      --per_level_files[pos];
-      ceph_assert(per_level_files[LEVEL_MAX - LEVEL_FIRST] > 0);
-      --per_level_files[LEVEL_MAX - LEVEL_FIRST];
-    }
-  }
-
-  uint8_t select_prefer_bdev(void* h) override;
-  void get_paths(
-    const std::string& base,
-    BlueFSVolumeSelector::paths& res) const override;
-
-  void dump(std::ostream& sout) override;
-  BlueFSVolumeSelector* clone_empty() const override;
-  bool compare(BlueFSVolumeSelector* other) override;
 };
 
 #endif

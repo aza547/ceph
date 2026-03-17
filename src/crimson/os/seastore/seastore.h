@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -18,11 +18,13 @@
 
 #include "os/Transaction.h"
 #include "crimson/common/throttle.h"
+#include "crimson/common/smp_helpers.h"
 #include "crimson/os/futurized_collection.h"
 #include "crimson/os/futurized_store.h"
 
 #include "crimson/os/seastore/device.h"
 #include "crimson/os/seastore/transaction.h"
+#include "crimson/os/seastore/transaction_interruptor.h"
 #include "crimson/os/seastore/onode_manager.h"
 #include "crimson/os/seastore/omap_manager.h"
 #include "crimson/os/seastore/collection_manager.h"
@@ -37,12 +39,11 @@ class TransactionManager;
 enum class op_type_t : uint8_t {
     DO_TRANSACTION = 0,
     READ,
-    WRITE,
     GET_ATTR,
     GET_ATTRS,
     STAT,
     OMAP_GET_VALUES,
-    OMAP_GET_VALUES2,
+    OMAP_ITERATE,
     MAX
 };
 
@@ -71,9 +72,6 @@ struct col_obj_ranges_t {
 
 class SeaStore final : public FuturizedStore {
 public:
-  using base_ertr = TransactionManager::base_ertr;
-  using base_iertr = TransactionManager::base_iertr;
-
   class MDStore {
   public:
     using write_meta_ertr = base_ertr;
@@ -96,7 +94,9 @@ public:
     Shard(
       std::string root,
       Device* device,
-      bool is_test);
+      bool is_test,
+      uint32_t store_shard_nums,
+      store_index_t store_index = 0);
     ~Shard() = default;
 
     seastar::future<struct stat> stat(
@@ -139,13 +139,12 @@ public:
       const omap_keys_t& keys,
       uint32_t op_flags = 0) final;
 
-    /// Retrieves paged set of values > start (if present)
-    read_errorator::future<omap_values_paged_t> omap_get_values(
-      CollectionRef c,           ///< [in] collection
-      const ghobject_t &oid,     ///< [in] oid
-      const std::optional<std::string> &start, ///< [in] start, empty for begin
-      uint32_t op_flags = 0
-      ) final; ///< @return <done, values> values.empty() iff done
+    read_errorator::future<ObjectStore::omap_iter_ret_t> omap_iterate(
+      CollectionRef c,
+      const ghobject_t &oid,
+      ObjectStore::omap_iter_seek_t start_from,
+      omap_iterate_cb_t callback,
+      uint32_t op_flags = 0) final;
 
     get_attr_errorator::future<bufferlist> omap_get_header(
       CollectionRef c,
@@ -189,7 +188,7 @@ public:
 
   // only exposed to SeaStore
   public:
-    seastar::future<> umount();
+    base_ertr::future<> umount();
     // init managers and mount transaction_manager
     seastar::future<> mount_managers();
 
@@ -204,11 +203,11 @@ public:
 
     seastar::future<std::string> get_default_device_class();
 
-    store_statfs_t stat() const;
+    seastar::future<store_statfs_t> stat() const;
 
     uuid_d get_fsid() const;
 
-    seastar::future<> mkfs_managers();
+    TransactionManager::alloc_extent_ertr::future<> mkfs_managers();
 
     void init_managers();
 
@@ -220,6 +219,13 @@ public:
 
     cache_stats_t get_cache_stats(bool report_detail, double seconds) const;
 
+    unsigned int get_store_index() const {
+      return store_index;
+    }
+
+    bool get_status() const {
+      return store_active;
+    }
   private:
     struct internal_context_t {
       CollectionRef ch;
@@ -247,61 +253,7 @@ public:
     TransactionManager::read_extent_iertr::future<std::optional<unsigned>>
     get_coll_bits(CollectionRef ch, Transaction &t) const;
 
-    static void on_error(ceph::os::Transaction &t);
-
-    template <typename F>
-    auto repeat_with_internal_context(
-      CollectionRef ch,
-      ceph::os::Transaction &&t,
-      Transaction::src_t src,
-      const char* tname,
-      op_type_t op_type,
-      F &&f) {
-      // The below repeat_io_num requires MUTATE
-      assert(src == Transaction::src_t::MUTATE);
-      return seastar::do_with(
-        internal_context_t(
-          ch, std::move(t),
-          transaction_manager->create_transaction(
-	    src, tname, t.get_fadvise_flags())),
-        std::forward<F>(f),
-        [this, op_type](auto &ctx, auto &f) {
-        assert(shard_stats.starting_io_num);
-        --(shard_stats.starting_io_num);
-        ++(shard_stats.waiting_collock_io_num);
-
-	return ctx.transaction->get_handle().take_collection_lock(
-	  static_cast<SeastoreCollection&>(*(ctx.ch)).ordering_lock
-	).then([this] {
-	  assert(shard_stats.waiting_collock_io_num);
-	  --(shard_stats.waiting_collock_io_num);
-	  ++(shard_stats.waiting_throttler_io_num);
-
-	  return throttler.get(1);
-	}).then([&, this] {
-	  assert(shard_stats.waiting_throttler_io_num);
-	  --(shard_stats.waiting_throttler_io_num);
-	  ++(shard_stats.processing_inlock_io_num);
-
-	  return repeat_eagain([&, this] {
-	    ++(shard_stats.repeat_io_num);
-
-	    ctx.reset_preserve_handle(*transaction_manager);
-	    return std::invoke(f, ctx);
-	  }).handle_error(
-	    crimson::ct_error::all_same_way([&ctx](auto e) {
-	      on_error(ctx.ext_transaction);
-	      return seastar::now();
-	    })
-	  );
-	}).then([this, op_type, &ctx] {
-	  add_latency_sample(op_type,
-	      std::chrono::steady_clock::now() - ctx.begin_timestamp);
-	}).finally([this] {
-	  throttler.put();
-	});
-      });
-    }
+    static void transaction_dump(ceph::os::Transaction &t);
 
     template <typename Ret, typename F>
     auto repeat_with_onode(
@@ -410,6 +362,13 @@ public:
       internal_context_t &ctx,
       OnodeRef &onode,
       OnodeRef &d_onode);
+    tm_ret _clone_range(
+      internal_context_t &ctx,
+      OnodeRef &src_onode,
+      OnodeRef &dst_onode,
+      extent_len_t srcoff,
+      extent_len_t length,
+      extent_len_t dstoff);
     tm_ret _zero(
       internal_context_t &ctx,
       Onode &onode,
@@ -436,6 +395,9 @@ public:
       internal_context_t &ctx,
       Onode &onode);
     tm_ret _create_collection(
+      internal_context_t &ctx,
+      const coll_t& cid, int bits);
+    tm_ret _split_collection(
       internal_context_t &ctx,
       const coll_t& cid, int bits);
     tm_ret _remove_collection(
@@ -493,11 +455,20 @@ public:
       const std::optional<std::string>& start,
       OMapManager::omap_list_config_t config) const;
 
+    using omaptree_iterate_ret = OMapManager::omap_iterate_ret;
+    omaptree_iterate_ret omaptree_iterate(
+      Transaction& t,
+      omap_root_t&& root,
+      ObjectStore::omap_iter_seek_t &start_from,
+      omap_iterate_cb_t callback
+      );
+
     base_iertr::future<omap_values_t> omaptree_get_values(
       Transaction& t,
       omap_root_t&& root,
       const omap_keys_t& keys) const;
 
+    using omap_values_paged_t = std::tuple<bool, omap_values_t>;
     base_iertr::future<omap_values_paged_t> omaptree_get_values(
       Transaction& t,
       omap_root_t&& root,
@@ -561,9 +532,11 @@ public:
     OnodeManagerRef onode_manager;
 
     common::Throttle throttler;
+    store_index_t store_index;
+    bool store_active = true;
 
     seastar::metrics::metric_group metrics;
-    void register_metrics();
+    void register_metrics(store_index_t store_index);
 
     mutable shard_stats_t shard_stats;
     mutable seastar::lowres_clock::time_point last_tp =
@@ -577,13 +550,30 @@ public:
     MDStoreRef mdstore);
   ~SeaStore();
 
-  seastar::future<> start() final;
+  seastar::future<uint32_t> start() final;
   seastar::future<> stop() final;
 
-  mount_ertr::future<> mount() final;
+  Device::access_ertr::future<> _mount();
+
+  // FuturizedStore::mount_ertr/mkfs_ertr only supports a stateful_ec
+  // to keep the interface intact, convert to stateful_ec.
+  crimson::os::FuturizedStore::mount_ertr::future<> mount() final {
+    return _mount().handle_error(
+      Device::access_ertr::all_same_way([](auto& code) {
+        return crimson::stateful_ec{code};
+    }));
+  }
   seastar::future<> umount() final;
 
-  mkfs_ertr::future<> mkfs(uuid_d new_osd_fsid) final;
+  Device::access_ertr::future<> _mkfs(uuid_d new_osd_fsid);
+
+  crimson::os::FuturizedStore::mkfs_ertr::future<> mkfs(uuid_d new_osd_fsid) final {
+    return _mkfs(new_osd_fsid).handle_error(
+      Device::access_ertr::all_same_way([](auto& code) {
+        return crimson::stateful_ec{code};
+    }));
+  }
+
   seastar::future<store_statfs_t> stat() const final;
   seastar::future<store_statfs_t> pool_statfs(int64_t pool_id) const final;
 
@@ -591,7 +581,7 @@ public:
 
   uuid_d get_fsid() const final {
     ceph_assert(seastar::this_shard_id() == primary_core);
-    return shard_stores.local().get_fsid();
+    return shard_stores.local().mshard_stores[0]->get_fsid();
   }
 
   seastar::future<> write_meta(const std::string& key, const std::string& value) final;
@@ -602,10 +592,27 @@ public:
 
   seastar::future<std::string> get_default_device_class() final;
 
-  FuturizedStore::Shard& get_sharded_store() final {
-    return shard_stores.local();
+  BackendStore get_backend_store(store_index_t store_index) final {
+    assert(!shard_stores.local().mshard_stores.empty());
+    if (store_index != NULL_STORE_INDEX) {
+      assert(store_index < shard_stores.local().mshard_stores.size());
+    }
+    auto this_id = seastar::this_shard_id();
+    if (this_id < store_shard_nums) {
+      return BackendStore(*this, this_id, store_index);
+    } else {
+      auto shard_id = this_id % store_shard_nums;
+      return BackendStore(*this, shard_id, store_index);
+    }
   }
 
+  FuturizedStore::Shard& get_sharded_store(store_index_t store_index = 0) final
+  {
+    assert(store_index < shard_stores.local().mshard_stores.size());
+    auto &shard_store = *(shard_stores.local().mshard_stores[store_index]);
+    assert(shard_store.get_status() == true);
+    return shard_store;
+  }
   static col_obj_ranges_t
   get_objs_range(CollectionRef ch, unsigned bits);
 
@@ -627,12 +634,38 @@ private:
 
   seastar::future<> set_secondaries();
 
+  seastar::future<> get_shard_nums();
+  seastar::future<> shard_stores_start(bool is_test);
+  seastar::future<> shard_stores_stop();
+
 private:
+class MultiShardStores {
+  public:
+    std::vector<std::unique_ptr<SeaStore::Shard>> mshard_stores;
+
+  public:
+    MultiShardStores(size_t count,
+                     const std::string& root,
+                     Device* dev,
+                     bool is_test,
+                     uint32_t store_shard_nums)
+    : mshard_stores() {
+      mshard_stores.reserve(count); // Reserve space for the shards
+      for (size_t store_index = 0; store_index < count; ++store_index) {
+        mshard_stores.emplace_back(std::make_unique<SeaStore::Shard>(
+          root, dev, is_test, store_shard_nums, store_index));
+      }
+    }
+    ~MultiShardStores() {
+      mshard_stores.clear();
+    }
+  };
   std::string root;
   MDStoreRef mdstore;
   DeviceRef device;
   std::vector<DeviceRef> secondaries;
-  seastar::sharded<SeaStore::Shard> shard_stores;
+  seastar::sharded<SeaStore::MultiShardStores> shard_stores;
+  uint32_t store_shard_nums = 0;
 
   mutable seastar::lowres_clock::time_point last_tp =
     seastar::lowres_clock::time_point::min();

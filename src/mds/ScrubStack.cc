@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -17,7 +18,7 @@
 #include "RetryMessage.h"
 #include "SnapRealm.h"
 #include "common/debug.h"
-#include "common/Formatter.h"
+#include "common/JSONFormatter.h"
 #include "mds/MDLog.h"
 #include "mds/MDSRank.h"
 #include "mds/MDCache.h"
@@ -307,16 +308,16 @@ void ScrubStack::kick_off_scrubs()
 	}
       }
     } else if (CDir *dir = dynamic_cast<CDir*>(*it)) {
-      auto next = it;
-      ++next;
+      ++it;
+      bool added_children = false;
       bool done = false; // it's done, so pop it off the stack
-      scrub_dirfrag(dir, &done);
+      scrub_dirfrag(dir, &added_children, &done);
       if (done) {
-	dout(20) << __func__ << " dirfrag, done" << dendl;
-	++it; // child inodes were queued at bottom of stack
-	dequeue(dir);
-      } else {
-	it = next;
+        dout(20) << __func__ << " dirfrag, done" << dendl;
+        dequeue(dir);
+      }
+      if (added_children) {
+        it = scrub_stack.begin();
       }
     } else {
       ceph_assert(0 == "dentry in scrub stack");
@@ -487,7 +488,20 @@ void ScrubStack::scrub_dir_inode_final(CInode *in)
   return;
 }
 
-void ScrubStack::scrub_dirfrag(CDir *dir, bool *done)
+void ScrubStack::identify_remote_link_damage(CDentry *dn) {
+
+  CDentry::linkage_t *dnl = dn->get_linkage();
+  CInode *remote_inode = mdcache->get_inode(dnl->get_remote_ino());
+  if (!remote_inode) {
+    if (mdcache->mds->damage_table.is_remote_damaged(dnl->get_remote_ino())) {
+      dout(4) << "scrub: remote dentry points to damaged ino " << *dn << dendl;
+      return;
+    }
+    mdcache->open_remote_dentry(dn, true, new C_MDSInternalNoop());
+  }
+}
+
+void ScrubStack::scrub_dirfrag(CDir *dir, bool *added_children, bool *done)
 {
   ceph_assert(dir != NULL);
 
@@ -508,8 +522,6 @@ void ScrubStack::scrub_dirfrag(CDir *dir, bool *done)
       ++it; /* trim (in the future) may remove dentry */
 
       if (dn->scrub(next_seq)) {
-        std::string path;
-        dir->get_inode()->make_path_string(path, true);
         clog->warn() << "Scrub error on dentry " << *dn
                      << " see " << g_conf()->name
                      << " log and `damage ls` output for details";
@@ -528,9 +540,10 @@ void ScrubStack::scrub_dirfrag(CDir *dir, bool *done)
 	continue;
       }
       if (dnl->is_primary()) {
-	_enqueue(dnl->get_inode(), header, false);
+  *added_children = true;
+	_enqueue(dnl->get_inode(), header, true);
       } else if (dnl->is_remote() || dnl->is_referent_remote()) {
-	// TODO: check remote linkage
+        identify_remote_link_damage(dn);
       }
     }
   }
@@ -1001,6 +1014,7 @@ void ScrubStack::handle_scrub(const cref_t<MMDSScrub> &m)
       ceph_assert(diri);
 
       std::vector<CDir*> dfs;
+      bool has_dirty_dirfrag = false;
       MDSGatherBuilder gather(g_ceph_context);
       frag_vec_t frags;
       diri->dirfragtree.get_leaves(frags);
@@ -1023,6 +1037,10 @@ void ScrubStack::handle_scrub(const cref_t<MMDSScrub> &m)
 	    dout(10) << __func__ << " can't auth pin " << *dir <<  dendl;
 	    dir->add_waiter(CDir::WAIT_UNFREEZE, gather.new_sub());
 	    continue;
+	  }
+          if (dir->is_dirty()) {
+            dout(10) << __func__ << " found dirty remote dirfrag " << *dir <<  dendl;
+            has_dirty_dirfrag = true;
 	  }
 	  dfs.push_back(dir);
 	}
@@ -1056,7 +1074,8 @@ void ScrubStack::handle_scrub(const cref_t<MMDSScrub> &m)
       }
 
       auto r = make_message<MMDSScrub>(MMDSScrub::OP_QUEUEDIR_ACK, m->get_ino(),
-				       std::move(queued), m->get_tag());
+				       std::move(queued), m->get_tag(),
+				       inodeno_t(), false, false, false, false, has_dirty_dirfrag);
       mdcache->mds->send_message_mds(r, from);
     }
     break;
@@ -1078,6 +1097,8 @@ void ScrubStack::handle_scrub(const cref_t<MMDSScrub> &m)
 
 	    const auto& header = diri->get_scrub_header();
 	    header->set_epoch_last_forwarded(scrub_epoch);
+	    if (m->is_remote_dirfrag_dirty())
+	      diri->mark_dirty_remote_dirfrag_scrubbed();
 	    remove_from_waiting(diri);
 	  }
 	}

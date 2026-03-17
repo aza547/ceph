@@ -548,6 +548,9 @@ class MotrLuaManager : public StoreLuaManager {
 
   /** Get a script named with the given key from the backing store */
   virtual int get_script(const DoutPrefixProvider* dpp, optional_yield y, const std::string& key, std::string& script) override;
+  /** Get the Lua bytecode if it exists, else script named with the given key from the backing store */
+  virtual std::tuple<rgw::lua::LuaCodeType, int> get_script_or_bytecode(const DoutPrefixProvider* dpp, optional_yield y,
+                                                                        const std::string& key) override;
   /** Put a script named with the given key to the backing store */
   virtual int put_script(const DoutPrefixProvider* dpp, optional_yield y, const std::string& key, const std::string& script) override;
   /** Delete a script named with the given key from the backing store */
@@ -677,6 +680,7 @@ class MotrObject : public StoreObject {
         boost::optional<ceph::real_time> delete_at,
         std::string* version_id, std::string* tag, std::string* etag,
         void (*progress_cb)(off_t, void *), void* progress_data,
+        rgw::sal::DataProcessorFactory* dp_factory,
         const DoutPrefixProvider* dpp, optional_yield y) override;
     virtual RGWAccessControlPolicy& get_acl(void) override { return acls; }
     virtual int set_acl(const RGWAccessControlPolicy& acl) override { acls = acl; return 0; }
@@ -939,7 +943,9 @@ public:
 		       std::string& tag, ACLOwner& owner,
 		       uint64_t olh_epoch,
 		       rgw::sal::Object* target_obj,
-		       prefix_map_t& processed_prefixes) override;
+		       prefix_map_t& processed_prefixes,
+           const char *if_match = nullptr,
+           const char *if_nomatch = nullptr) override;
   virtual int cleanup_orphaned_parts(const DoutPrefixProvider *dpp,
            CephContext *cct, optional_yield y,
            const rgw_obj& obj,

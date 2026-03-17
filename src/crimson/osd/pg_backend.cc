@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "pg_backend.h"
 
@@ -61,7 +61,7 @@ PGBackend::create(pg_t pgid,
 					       coll, shard_services,
 					       dpp);
   case pg_pool_t::TYPE_ERASURE:
-    return std::make_unique<ECBackend>(pg_shard.shard, coll, shard_services,
+    return std::make_unique<ECBackend>( pg_shard.shard, coll, shard_services, pg.get_store_index(),
                                        std::move(ec_profile),
                                        pool.stripe_width,
 				       dpp);
@@ -74,21 +74,24 @@ PGBackend::create(pg_t pgid,
 PGBackend::PGBackend(shard_id_t shard,
                      CollectionRef coll,
                      crimson::osd::ShardServices &shard_services,
+                     store_index_t store_index,
 		     DoutPrefixProvider &dpp)
   : shard{shard},
     coll{coll},
     shard_services{shard_services},
     dpp{dpp},
-    store{&shard_services.get_store()}
+    store{shard_services.get_store(store_index)}
 {}
 
 PGBackend::load_metadata_iertr::future
   <PGBackend::loaded_object_md_t::ref>
 PGBackend::load_metadata(const hobject_t& oid)
 {
-  return interruptor::make_interruptible(store->get_attrs(
+  return interruptor::make_interruptible(
+    crimson::os::with_store<&crimson::os::FuturizedStore::Shard::get_attrs>(
+    store,
     coll,
-    ghobject_t{oid, ghobject_t::NO_GEN, shard})).safe_then_interruptible(
+    ghobject_t{oid, ghobject_t::NO_GEN, shard}, 0)).safe_then_interruptible(
       [oid](auto &&attrs) -> load_metadata_ertr::future<loaded_object_md_t::ref>{
         loaded_object_md_t::ref ret(new loaded_object_md_t());
         if (auto oiiter = attrs.find(OI_ATTR); oiiter != attrs.end()) {
@@ -255,13 +258,19 @@ PGBackend::sparse_read(const ObjectState& os, OSDOp& osd_op,
   }
   logger().trace("sparse_read: {} {}~{}",
                  os.oi.soid, (uint64_t)op.extent.offset, (uint64_t)op.extent.length);
-  return interruptor::make_interruptible(store->fiemap(coll, ghobject_t{os.oi.soid},
-    offset, adjusted_length)).safe_then_interruptible(
+
+  return interruptor::make_interruptible(
+    crimson::os::with_store<&crimson::os::FuturizedStore::Shard::fiemap>(
+    store, coll, ghobject_t{os.oi.soid},
+    static_cast<uint64_t>(offset),
+    static_cast<uint64_t>(adjusted_length),static_cast<uint32_t>(0))).safe_then_interruptible(
     [&delta_stats, &os, &osd_op, this](auto&& m) {
     return seastar::do_with(interval_set<uint64_t>{std::move(m)},
 			    [&delta_stats, &os, &osd_op, this](auto&& extents) {
-      return interruptor::make_interruptible(store->readv(coll, ghobject_t{os.oi.soid},
-                          extents, osd_op.op.flags)).safe_then_interruptible_tuple(
+      return interruptor::make_interruptible(
+        crimson::os::with_store<&crimson::os::FuturizedStore::Shard::readv>(
+          store, coll, ghobject_t{os.oi.soid},
+          std::ref(extents), osd_op.op.flags)).safe_then_interruptible_tuple(
         [&delta_stats, &os, &osd_op, &extents](auto&& bl) -> read_errorator::future<> {
         if (_read_verify_data(os.oi, bl)) {
           osd_op.op.extent.length = bl.length();
@@ -833,7 +842,14 @@ PGBackend::rollback_iertr::future<> PGBackend::rollback(
                      " because got ENOENT|whiteout on obc lookup",
                      os.oi.soid, snapid);
       return remove(os, txn, osd_op_params, delta_stats,
-                    should_whiteout(ss, snapc), os.oi.size);
+                    should_whiteout(ss, snapc), os.oi.size
+      ).handle_error_interruptible(
+	crimson::ct_error::enoent::handle([] {
+	  // We consider rolling back a non-existing head to
+	  // non-existing clone as a no-op.
+	  return rollback_iertr::now();
+	})
+      );
     }),
     rollback_ertr::pass_further{},
     crimson::ct_error::assert_all{"unexpected error in rollback"}
@@ -1041,7 +1057,8 @@ PGBackend::list_objects(
   auto gstart = start.is_min() ? ghobject_t{} : ghobject_t{start, 0, shard};
   auto gend = end.is_max() ? ghobject_t::get_max() : ghobject_t{end, 0, shard};
   auto [gobjects, next] = co_await interruptor::make_interruptible(
-    store->list_objects(coll, gstart, gend, limit));
+    crimson::os::with_store<&crimson::os::FuturizedStore::Shard::list_objects>(
+      store, coll, gstart, gend, limit, 0));
 
   std::vector<hobject_t> objects;
   boost::copy(
@@ -1074,26 +1091,29 @@ PGBackend::setxattr_ierrorator::future<> PGBackend::setxattr(
       osd_op.op.xattr.value_len > local_conf()->osd_max_attr_size) {
     return crimson::ct_error::file_too_large::make();
   }
+  return crimson::os::with_store<
+    &crimson::os::FuturizedStore::Shard::get_max_attr_name_length
+  >(store).then([this, &os, &osd_op, &txn, &delta_stats](unsigned store_max_name_len) {
+    const auto max_name_len = std::min<uint64_t>(
+      store_max_name_len, local_conf()->osd_max_attr_name_len);
+    if (osd_op.op.xattr.name_len > max_name_len) {
+      return setxattr_ierrorator::future<>(crimson::ct_error::enametoolong::make());
+    }
 
-  const auto max_name_len = std::min<uint64_t>(
-    store->get_max_attr_name_length(), local_conf()->osd_max_attr_name_len);
-  if (osd_op.op.xattr.name_len > max_name_len) {
-    return crimson::ct_error::enametoolong::make();
-  }
+    maybe_create_new_object(os, txn, delta_stats);
 
-  maybe_create_new_object(os, txn, delta_stats);
-
-  std::string name{"_"};
-  ceph::bufferlist val;
-  {
-    auto bp = osd_op.indata.cbegin();
-    bp.copy(osd_op.op.xattr.name_len, name);
-    bp.copy(osd_op.op.xattr.value_len, val);
-  }
-  logger().debug("setxattr on obj={} for attr={}", os.oi.soid, name);
-  txn.setattr(coll->get_cid(), ghobject_t{os.oi.soid}, name, val);
-  delta_stats.num_wr++;
-  return seastar::now();
+    std::string name{"_"};
+    ceph::bufferlist val;
+    {
+      auto bp = osd_op.indata.cbegin();
+      bp.copy(osd_op.op.xattr.name_len, name);
+      bp.copy(osd_op.op.xattr.value_len, val);
+    }
+    logger().debug("setxattr on obj={} for attr={}", os.oi.soid, name);
+    txn.setattr(coll->get_cid(), ghobject_t{os.oi.soid}, name, val);
+    delta_stats.num_wr++;
+    return setxattr_ierrorator::future<>(seastar::now());
+  });
 }
 
 PGBackend::get_attr_ierrorator::future<> PGBackend::getxattr(
@@ -1125,7 +1145,8 @@ PGBackend::getxattr(
   const hobject_t& soid,
   std::string_view key) const
 {
-  return store->get_attr(coll, ghobject_t{soid}, key);
+  return crimson::os::with_store<&crimson::os::FuturizedStore::Shard::get_attr>(
+    store, coll, ghobject_t{soid}, key, 0);
 }
 
 PGBackend::get_attr_ierrorator::future<ceph::bufferlist>
@@ -1134,7 +1155,8 @@ PGBackend::getxattr(
   std::string&& key) const
 {
   return seastar::do_with(key, [this, &soid](auto &key) {
-    return store->get_attr(coll, ghobject_t{soid}, key);
+    return crimson::os::with_store<&crimson::os::FuturizedStore::Shard::get_attr>(
+      store, coll, ghobject_t{soid}, key, 0);
   });
 }
 
@@ -1143,7 +1165,8 @@ PGBackend::get_attr_ierrorator::future<> PGBackend::get_xattrs(
   OSDOp& osd_op,
   object_stat_sum_t& delta_stats) const
 {
-  return store->get_attrs(coll, ghobject_t{os.oi.soid}).safe_then(
+  return crimson::os::with_store<&crimson::os::FuturizedStore::Shard::get_attrs>(
+    store, coll, ghobject_t{os.oi.soid}, 0).safe_then(
     [&delta_stats, &osd_op](auto&& attrs) {
     std::vector<std::pair<std::string, bufferlist>> user_xattrs;
     ceph::bufferlist bl;
@@ -1296,29 +1319,35 @@ static
 get_omap_iertr::future<
   crimson::os::FuturizedStore::Shard::omap_values_t>
 maybe_get_omap_vals_by_keys(
-  crimson::os::FuturizedStore::Shard* store,
+  crimson::os::BackendStore store,
   const crimson::os::CollectionRef& coll,
   const object_info_t& oi,
   const std::set<std::string>& keys_to_get)
 {
   if (oi.is_omap()) {
-    return store->omap_get_values(coll, ghobject_t{oi.soid}, keys_to_get);
+    return crimson::os::with_store<&crimson::os::FuturizedStore::Shard::omap_get_values>(
+      store, coll, ghobject_t{oi.soid}, keys_to_get, 0);
   } else {
     return crimson::ct_error::enodata::make();
   }
 }
 
+using get_omap_iterate_ertr =
+  crimson::os::FuturizedStore::Shard::read_errorator::extend<
+    crimson::ct_error::enodata>;
+using omap_iterate_cb_t = crimson::os::FuturizedStore::Shard::omap_iterate_cb_t;
 static
-get_omap_iertr::future<
-  std::tuple<bool, crimson::os::FuturizedStore::Shard::omap_values_t>>
-maybe_get_omap_vals(
-  crimson::os::FuturizedStore::Shard* store,
+get_omap_iterate_ertr::future<ObjectStore::omap_iter_ret_t>
+maybe_do_omap_iterate(
+  crimson::os::BackendStore store,
   const crimson::os::CollectionRef& coll,
   const object_info_t& oi,
-  const std::string& start_after)
+  ObjectStore::omap_iter_seek_t start_from,
+  omap_iterate_cb_t callback)
 {
   if (oi.is_omap()) {
-    return store->omap_get_values(coll, ghobject_t{oi.soid}, start_after);
+    return crimson::os::with_store<&crimson::os::FuturizedStore::Shard::omap_iterate>(
+      store, coll, ghobject_t{oi.soid}, start_from, callback, 0);
   } else {
     return crimson::ct_error::enodata::make();
   }
@@ -1330,7 +1359,8 @@ PGBackend::omap_get_header(
   const ghobject_t& oid,
   uint32_t op_flags) const
 {
-  return store->omap_get_header(c, oid, op_flags)
+  return crimson::os::with_store<&crimson::os::FuturizedStore::Shard::omap_get_header>(
+    store, c, oid, op_flags)
     .handle_error(
       crimson::ct_error::enodata::handle([] {
 	return seastar::make_ready_future<bufferlist>();
@@ -1371,7 +1401,7 @@ PGBackend::omap_get_keys(
 {
   if (!os.exists || os.oi.is_whiteout()) {
     logger().debug("{}: object does not exist: {}", os.oi.soid);
-    return crimson::ct_error::enoent::make();
+    co_await ll_read_ierrorator::future<>(crimson::ct_error::enoent::make());
   }
   std::string start_after;
   uint64_t max_return;
@@ -1382,43 +1412,49 @@ PGBackend::omap_get_keys(
   } catch (buffer::error&) {
     throw crimson::osd::invalid_argument{};
   }
+  uint64_t max_omap_entries = local_conf()->osd_max_omap_entries_per_request;
   max_return =
-    std::min(max_return, local_conf()->osd_max_omap_entries_per_request);
+    std::min(max_return, max_omap_entries);
 
+  ceph::bufferlist result;
+  uint32_t num = 0;
+  bool truncated = false;
+  ObjectStore::omap_iter_seek_t start_from{start_after, ObjectStore::omap_iter_seek_t::UPPER_BOUND};
+  omap_iterate_cb_t callback = [&result, &num, &truncated, max_return]
+    (std::string_view key, std::string_view value)
+  {
+    if (num >= max_return) {
+      truncated = true;
+      return ObjectStore::omap_iter_ret_t::STOP;
+    }
+    encode(key, result);
+    ++num;
+    return ObjectStore::omap_iter_ret_t::NEXT;
+  };
 
-  // TODO: truly chunk the reading
-  return maybe_get_omap_vals(store, coll, os.oi, start_after).safe_then_interruptible(
-    [=,&delta_stats, &osd_op](auto ret) {
-      ceph::bufferlist result;
-      bool truncated = false;
+  co_await maybe_do_omap_iterate(store, coll, os.oi, start_from, callback
+  ).safe_then([&delta_stats, &osd_op, &result, &num, &truncated](auto ret){
+    if (ret != ObjectStore::omap_iter_ret_t::STOP) {
+      logger().warn("omap_iterate not meet a stop condition");
+    }
+    encode(num, osd_op.outdata);
+    osd_op.outdata.claim_append(result);
+    encode(truncated, osd_op.outdata);
+    delta_stats.num_rd_kb += shift_round_up(osd_op.outdata.length(), 10);
+    delta_stats.num_rd++;
+  }).handle_error(
+    crimson::ct_error::enodata::handle([&osd_op] {
       uint32_t num = 0;
-      for (auto &[key, val] : std::get<1>(ret)) {
-        if (num >= max_return ||
-            result.length() >= local_conf()->osd_max_omap_bytes_per_request) {
-          truncated = true;
-          break;
-        }
-        encode(key, result);
-        ++num;
-      }
+      bool truncated = false;
       encode(num, osd_op.outdata);
-      osd_op.outdata.claim_append(result);
       encode(truncated, osd_op.outdata);
-      delta_stats.num_rd_kb += shift_round_up(osd_op.outdata.length(), 10);
-      delta_stats.num_rd++;
+      osd_op.rval = 0;
       return seastar::now();
-    }).handle_error_interruptible(
-      crimson::ct_error::enodata::handle([&osd_op] {
-        uint32_t num = 0;
-	bool truncated = false;
-	encode(num, osd_op.outdata);
-	encode(truncated, osd_op.outdata);
-	osd_op.rval = 0;
-	return seastar::now();
-      }),
-      ll_read_errorator::pass_further{}
-    );
+    }),
+    ll_read_errorator::pass_further{}
+  );
 }
+
 static
 PGBackend::omap_cmp_ertr::future<> do_omap_val_cmp(
   std::map<std::string, bufferlist, std::less<>> out,
@@ -1476,7 +1512,8 @@ PGBackend::omap_cmp(
     for (auto &i: assertions) {
       to_get.insert(i.first);
     }
-    return store->omap_get_values(coll, ghobject_t{os.oi.soid}, to_get)
+    return crimson::os::with_store<&crimson::os::FuturizedStore::Shard::omap_get_values>(
+      store, coll, ghobject_t{os.oi.soid}, to_get, 0)
       .safe_then([=, &osd_op] (auto&& out) -> omap_cmp_iertr::future<> {
       osd_op.rval = 0;
       return  do_omap_val_cmp(out, assertions);
@@ -1493,7 +1530,7 @@ PGBackend::omap_get_vals(
 {
   if (!os.exists || os.oi.is_whiteout()) {
     logger().debug("{}: object does not exist: {}", os.oi.soid);
-    return crimson::ct_error::enoent::make();
+    co_await ll_read_ierrorator::future<>(crimson::ct_error::enoent::make());
   }
   std::string start_after;
   uint64_t max_return;
@@ -1507,48 +1544,53 @@ PGBackend::omap_get_vals(
     throw crimson::osd::invalid_argument{};
   }
 
+  uint64_t max_omap_entries = local_conf()->osd_max_omap_entries_per_request;
   max_return = \
-    std::min(max_return, local_conf()->osd_max_omap_entries_per_request);
-  delta_stats.num_rd_kb += shift_round_up(osd_op.outdata.length(), 10);
-  delta_stats.num_rd++;
+    std::min(max_return, max_omap_entries);
 
-  // TODO: truly chunk the reading
-  return maybe_get_omap_vals(store, coll, os.oi, start_after)
-  .safe_then_interruptible(
-    [=, &osd_op] (auto&& ret) {
-      auto [done, vals] = std::move(ret);
-      assert(done);
-      ceph::bufferlist result;
-      bool truncated = false;
-      uint32_t num = 0;
-      auto iter = filter_prefix > start_after ? vals.lower_bound(filter_prefix)
-                                              : std::begin(vals);
-      for (; iter != std::end(vals); ++iter) {
-        const auto& [key, value] = *iter;
-        if (key.substr(0, filter_prefix.size()) != filter_prefix) {
-          break;
-        } else if (num >= max_return ||
-            result.length() >= local_conf()->osd_max_omap_bytes_per_request) {
-          truncated = true;
-          break;
-        }
-        encode(key, result);
-        encode(value, result);
-        ++num;
-      }
-      encode(num, osd_op.outdata);
-      osd_op.outdata.claim_append(result);
-      encode(truncated, osd_op.outdata);
+  ceph::bufferlist result;
+  uint32_t num = 0;
+  bool truncated = false;
+  ObjectStore::omap_iter_seek_t start_from = ObjectStore::omap_iter_seek_t::min_lower_bound();
+  start_from.seek_position = filter_prefix > start_after ? filter_prefix : start_after;
+  start_from.seek_type = filter_prefix > start_after ?
+                         ObjectStore::omap_iter_seek_t::LOWER_BOUND :
+                         ObjectStore::omap_iter_seek_t::UPPER_BOUND;
+  omap_iterate_cb_t callback = [filter_prefix, max_return, &result, &num, &truncated]
+    (std::string_view key, std::string_view value)
+  {
+    if (num >= max_return) {
+      truncated = true;
+    }
+    if (key.substr(0, filter_prefix.size()) != filter_prefix || truncated == true) {
+      return ObjectStore::omap_iter_ret_t::STOP;
+    }
+
+    encode(key, result);
+    encode(value, result);
+    ++num;
+    return ObjectStore::omap_iter_ret_t::NEXT;
+  };
+
+  co_await maybe_do_omap_iterate(store, coll, os.oi, start_from, callback
+  ).safe_then([&osd_op, &delta_stats, &result, &num, &truncated](auto ret) {
+    if (ret != ObjectStore::omap_iter_ret_t::STOP) {
+      logger().warn("omap_iterate not meet a stop condition");
+    }
+    encode(num, osd_op.outdata);
+    osd_op.outdata.claim_append(result);
+    encode(truncated, osd_op.outdata);
+    delta_stats.num_rd_kb += shift_round_up(osd_op.outdata.length(), 10);
+    delta_stats.num_rd++;
+  }).handle_error(
+    crimson::ct_error::enodata::handle([&osd_op] {
+      encode(uint32_t{0} /* num */, osd_op.outdata);
+      encode(bool{false} /* truncated */, osd_op.outdata);
+      osd_op.rval = 0;
       return ll_read_errorator::now();
-    }).handle_error_interruptible(
-      crimson::ct_error::enodata::handle([&osd_op] {
-        encode(uint32_t{0} /* num */, osd_op.outdata);
-        encode(bool{false} /* truncated */, osd_op.outdata);
-        osd_op.rval = 0;
-        return ll_read_errorator::now();
-      }),
-      ll_read_errorator::pass_further{}
-    );
+    }),
+    ll_read_errorator::pass_further{}
+  );
 }
 
 PGBackend::ll_read_ierrorator::future<>
@@ -1703,7 +1745,8 @@ PGBackend::stat(
   CollectionRef c,
   const ghobject_t& oid) const
 {
-  return store->stat(c, oid);
+  return crimson::os::with_store<&crimson::os::FuturizedStore::Shard::stat>(
+    store, c, oid, 0);
 }
 
 PGBackend::read_errorator::future<std::map<uint64_t, uint64_t>>
@@ -1714,7 +1757,8 @@ PGBackend::fiemap(
   uint64_t len,
   uint32_t op_flags)
 {
-  return store->fiemap(c, oid, off, len);
+  return crimson::os::with_store<&crimson::os::FuturizedStore::Shard::fiemap>(
+    store, c, oid, off, len, 0);
 }
 
 PGBackend::write_iertr::future<> PGBackend::tmapput(

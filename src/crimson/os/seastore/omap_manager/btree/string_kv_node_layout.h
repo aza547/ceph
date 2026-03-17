@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -70,18 +70,28 @@ static void copy_from_local(
   assert(tgt->node == from_src->node);
   assert(to_src->node == from_src->node);
 
+  auto end = to_src->get_right_ptr_end();
+  auto key_end = to_src->get_node_key_ptr();
+  auto key_len = from_src->get_node_key_ptr() - tgt->get_node_key_ptr();
+
   auto to_copy = from_src->get_right_ptr_end() - to_src->get_right_ptr_end();
-  assert(to_copy > 0);
+  assert(to_copy >= 0);
   int adjust_offset = tgt > from_src? -len : len;
   memmove(to_src->get_right_ptr_end() + adjust_offset,
           to_src->get_right_ptr_end(),
           to_copy);
 
+  if (from_src > tgt) {   //keep same content for rm_key and rm_keyrange in case replay has crc error
+    memset(end, 0, len);
+  }
   for ( auto ite = from_src; ite < to_src; ite++) {
       ite->update_offset(-adjust_offset);
   }
   memmove(tgt->get_node_key_ptr(), from_src->get_node_key_ptr(),
           to_src->get_node_key_ptr() - from_src->get_node_key_ptr());
+  if (from_src > tgt) {
+    memset(key_end - key_len, 0, key_len);
+  }
 }
 
 struct delta_inner_t {
@@ -597,11 +607,8 @@ public:
   }
 
   const_iterator find_string_key(std::string_view str) const {
-    auto iter = string_lower_bound(str);
-    if (iter.get_key() == str) {
-      return iter;
-    }
-    return iter_cend();
+    auto it = string_lower_bound(str);
+    return (it != iter_cend() && it.get_key() == str) ? it : iter_cend();
   }
 
   iterator find_string_key(std::string_view str) {
@@ -1140,6 +1147,21 @@ public:
     }
     leaf_remove(iter);
   }
+  void journal_leaf_remove_range(
+    const_iterator _fiter,
+    const_iterator _liter,
+    delta_leaf_buffer_t *recorder) {
+    assert(_fiter != iter_end());
+    assert(_fiter != _liter);
+    auto fiter = iterator(this, _fiter.index);
+    auto liter = iterator(this, _liter.index);
+    if (recorder) {
+      for(auto iter = fiter; iter != liter; iter++) {
+        recorder->remove(iter->get_key());
+      }
+    }
+    leaf_remove_range(fiter, liter);
+  }
 
   StringKVLeafNodeLayout() : buf(nullptr) {}
 
@@ -1182,20 +1204,14 @@ public:
   }
 
   const_iterator string_lower_bound(std::string_view str) const {
-    uint16_t start = 0, end = get_size();
-    while (start != end) {
-      unsigned mid = (start + end) / 2;
-      const_iterator iter(this, mid);
-      std::string s = iter->get_key();
-      if (s < str) {
-        start = ++mid;
-      } else if (s > str) {
-        end = mid;
-      } else {
-        return iter;
-      }
-    }
-    return const_iterator(this, start);
+    auto it = std::lower_bound(boost::make_counting_iterator<uint16_t>(0),
+                               boost::make_counting_iterator<uint16_t>(get_size()),
+                               str,
+                               [this](uint16_t i, std::string_view str) {
+                                 const_iterator iter(this, i);
+                                 return iter->get_key() < str;
+                               });
+    return const_iterator(this, *it);
   }
 
   iterator string_lower_bound(std::string_view str) {
@@ -1204,13 +1220,14 @@ public:
   }
 
   const_iterator string_upper_bound(std::string_view str) const {
-    auto ret = iter_begin();
-    for (; ret != iter_end(); ++ret) {
-      std::string s = ret->get_key();
-      if (s > str)
-        break;
-    }
-    return ret;
+    auto it = std::upper_bound(boost::make_counting_iterator<uint16_t>(0),
+                               boost::make_counting_iterator<uint16_t>(get_size()),
+                               str,
+                               [this](std::string_view str, uint16_t i) {
+                                 const_iterator iter(this, i);
+                                 return str < iter->get_key();
+                               });
+    return const_iterator(this, *it);
   }
 
   iterator string_upper_bound(std::string_view str) {
@@ -1219,14 +1236,10 @@ public:
   }
 
   const_iterator find_string_key(std::string_view str) const {
-    auto ret = iter_begin();
-    for (; ret != iter_end(); ++ret) {
-      std::string s = ret->get_key();
-      if (s == str)
-        break;
-    }
-    return ret;
+    auto it = string_lower_bound(str);
+    return (it != iter_end() && it.get_key() == str) ? it : iter_end();
   }
+
   iterator find_string_key(std::string_view str) {
     const auto &tref = *this;
     return iterator(this, tref.find_string_key(str).index);
@@ -1529,13 +1542,21 @@ private:
 
   void leaf_remove(iterator iter) {
     assert(iter != iter_end());
-    if ((iter + 1) != iter_end()) {
-      omap_leaf_key_t key = iter->get_node_key();
-      copy_from_local(key.key_len + key.val_len, iter, iter + 1, iter_end());
-    }
+
+    omap_leaf_key_t key = iter->get_node_key();
+    copy_from_local(key.key_len + key.val_len, iter, iter + 1, iter_end());
+
     set_size(get_size() - 1);
   }
+  void leaf_remove_range(iterator fiter, iterator liter) {
+    assert(fiter != iter_end());
 
+    auto adjust_len = fiter->get_right_ptr_end() - liter->get_right_ptr_end();
+    copy_from_local(adjust_len, fiter, liter, iter_end());
+
+
+    set_size(get_size() - (liter - fiter));
+  }
   /**
    * get_key_ptr
    *

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -213,6 +214,12 @@ private:
   void scrub_file_inode(CInode *in);
 
   /**
+   * Scrub a file inode.
+   * @param dn The remote dentry to identify
+   */
+  void identify_remote_link_damage(CDentry *dn);
+
+  /**
    * Callback from completion of CInode::validate_disk_state
    * @param in The inode we were validating
    * @param r The return status from validate_disk_state
@@ -235,9 +242,10 @@ private:
    * scrub of the dirfrag.
    *
    * @param dir The dirfrag to scrub (must be auth)
+   * @param added_children set to true if we pushed some of our children
    * @param done set to true if we started to do final scrub
    */
-  void scrub_dirfrag(CDir *dir, bool *done);
+  void scrub_dirfrag(CDir *dir, bool *added_children, bool *done);
   /**
    * Scrub a directory-representing dentry.
    *

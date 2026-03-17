@@ -48,6 +48,7 @@ Cloud Storage Class Tier Configuration
     "acls": [ { "type": <id | email | uri>,
                 "source_id": <source_id>,
                 "dest_id": <dest_id> } ... ],
+    "location_constraint": <location-constraint>,
     "target_path": <target_path>,
     "target_storage_class": <target-storage-class>,
     "multipart_sync_threshold": {object_size},
@@ -112,6 +113,10 @@ Cloud Transition Specific Configurables
 
   For example: ``target_path = rgwx-archive-${zonegroup}/``
 
+* ``location_constraint`` (string)
+
+  Specifies the region where the target bucket will be created on the remote S3 endpoint. For AWS, this location needs to be specified only if the region is other than US East (us-east-1).
+
 * ``target_storage_class`` (string)
 
   A string that defines the target storage class to which the object transitions.
@@ -122,7 +127,7 @@ Cloud Transition Specific Configurables
   If ``true``, the metadata of the object transitioned to the cloud service is retained.
   If ``false`` (default), the object is deleted after the transition.
   This option is ignored for current-versioned objects. For more details,
-  refer to the :ref:`Versioned Objects<versioned_objects>` section below.
+  refer to the :ref:`versioned_objects` section below.
 
 
 S3 Specific Configurables
@@ -197,6 +202,7 @@ For example
                               "access_key": "",
                               "secret": "",
                               "host_style": "path",
+                              "location_constraint": "",
                               "target_storage_class": "",
                               "target_path": "",
                               "acl_mappings": [],
@@ -421,7 +427,7 @@ For versioned and locked objects, similar semantics as that of LifecycleExpirati
 Restoring Objects
 -----------------
 The objects transitioned to cloud can now be restored. For more information, refer to
-`Restoring Objects from Cloud <https://docs.ceph.com/en/latest/radosgw/cloud-restore/>`_.
+:ref:`Restoring Objects from Cloud <radosgw-cloud-restore>`.
 
 
 Future Work

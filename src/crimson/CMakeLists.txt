@@ -21,10 +21,12 @@ set(crimson_common_srcs
   common/buffer_seastar.cc
   crush/CrushLocation.cc)
 
+include_directories(${CMAKE_SOURCE_DIR}/src/dmclock/support/src)
 # the specialized version of ceph-common, where
 #  - the logging is sent to Seastar backend
 #  - and the template parameter of lock_policy is SINGLE
 add_library(crimson-common STATIC
+  ${PROJECT_SOURCE_DIR}/src/auth/Auth.cc
   ${PROJECT_SOURCE_DIR}/src/auth/Crypto.cc
   ${PROJECT_SOURCE_DIR}/src/common/admin_socket_client.cc
   ${PROJECT_SOURCE_DIR}/src/common/bit_str.cc
@@ -33,6 +35,7 @@ add_library(crimson-common STATIC
   ${PROJECT_SOURCE_DIR}/src/common/ceph_argparse.cc
   ${PROJECT_SOURCE_DIR}/src/common/ceph_context.cc
   ${PROJECT_SOURCE_DIR}/src/common/ceph_crypto.cc
+  ${PROJECT_SOURCE_DIR}/src/common/ceph_fs.cc
   ${PROJECT_SOURCE_DIR}/src/common/ceph_hash.cc
   ${PROJECT_SOURCE_DIR}/src/common/ceph_time.cc
   ${PROJECT_SOURCE_DIR}/src/common/ceph_strings.cc
@@ -49,6 +52,7 @@ add_library(crimson-common STATIC
   ${PROJECT_SOURCE_DIR}/src/common/errno.cc
   ${PROJECT_SOURCE_DIR}/src/common/escape.cc
   ${PROJECT_SOURCE_DIR}/src/common/hex.cc
+  ${PROJECT_SOURCE_DIR}/src/common/frag.cc
   ${PROJECT_SOURCE_DIR}/src/common/fs_types.cc
   ${PROJECT_SOURCE_DIR}/src/common/ceph_json.cc
   ${PROJECT_SOURCE_DIR}/src/common/histogram.cc
@@ -72,12 +76,15 @@ add_library(crimson-common STATIC
   ${PROJECT_SOURCE_DIR}/src/common/utf8.c
   ${PROJECT_SOURCE_DIR}/src/common/version.cc
   ${PROJECT_SOURCE_DIR}/src/common/BackTrace.cc
+  ${PROJECT_SOURCE_DIR}/src/common/CompatSet.cc
   ${PROJECT_SOURCE_DIR}/src/common/ConfUtils.cc
   ${PROJECT_SOURCE_DIR}/src/common/DecayCounter.cc
   ${PROJECT_SOURCE_DIR}/src/common/HTMLFormatter.cc
   ${PROJECT_SOURCE_DIR}/src/common/Formatter.cc
+  ${PROJECT_SOURCE_DIR}/src/common/JSONFormatter.cc
+  ${PROJECT_SOURCE_DIR}/src/common/TableFormatter.cc
+  ${PROJECT_SOURCE_DIR}/src/common/XMLFormatter.cc
   ${PROJECT_SOURCE_DIR}/src/common/Graylog.cc
-  ${PROJECT_SOURCE_DIR}/src/common/Journald.cc
   ${PROJECT_SOURCE_DIR}/src/common/ostream_temp.cc
   ${PROJECT_SOURCE_DIR}/src/common/LogEntry.cc
   ${PROJECT_SOURCE_DIR}/src/common/TextTable.cc
@@ -95,6 +102,11 @@ add_library(crimson-common STATIC
   ${PROJECT_SOURCE_DIR}/src/crush/CrushTester.cc
   ${PROJECT_SOURCE_DIR}/src/global/global_context.cc
   ${PROJECT_SOURCE_DIR}/src/global/pidfile.cc
+  ${PROJECT_SOURCE_DIR}/src/include/filepath.cc
+  ${PROJECT_SOURCE_DIR}/src/include/object.cc
+  ${PROJECT_SOURCE_DIR}/src/include/types.cc
+  ${PROJECT_SOURCE_DIR}/src/include/utime.cc
+  ${PROJECT_SOURCE_DIR}/src/include/uuid.cc
   ${PROJECT_SOURCE_DIR}/src/librbd/Features.cc
   ${PROJECT_SOURCE_DIR}/src/librbd/io/IoOperations.cc
   ${PROJECT_SOURCE_DIR}/src/mgr/ServiceMap.cc
@@ -116,7 +128,9 @@ add_library(crimson-common STATIC
   ${PROJECT_SOURCE_DIR}/src/osd/OSDMap.cc
   ${PROJECT_SOURCE_DIR}/src/osd/PGPeeringEvent.cc
   ${PROJECT_SOURCE_DIR}/src/common/scrub_types.cc
+  ${PROJECT_SOURCE_DIR}/src/common/mclock_common.cc
   ${PROJECT_SOURCE_DIR}/src/xxHash/xxhash.c
+  $<$<BOOL:${WITH_SYSTEMD}>:${PROJECT_SOURCE_DIR}/src/common/Journald.cc>
   ${crimson_common_srcs}
   $<TARGET_OBJECTS:common_mountcephfs_objs>
   $<TARGET_OBJECTS:common-options-objs>)

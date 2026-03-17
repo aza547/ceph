@@ -36,7 +36,6 @@ export enum Icons {
   infoCircle = 'information--filled', // Info on landing page
   questionCircle = 'help',
   danger = 'warning--filled',
-  // success = 'fa fa-check-circle',
   success = 'checkmark--filled',
   check = 'checkmark', // Notification check
   show = 'view', // Show
@@ -84,6 +83,16 @@ export enum Icons {
   launch = 'launch',
   parentChild = 'parent-child',
   dataTable = 'data-table',
+  idea = 'idea',
+  userAccessLocked = 'user--access-locked', // User access locked
+  chevronDown = 'chevron--down',
+  connect = 'connect',
+  checkmarkOutline = 'checkmark--outline',
+  circleDash = 'circle-dash',
+  datastore = 'datastore',
+  ibmCloudBareMetalServer = 'ibm-cloud--bare-metal-server',
+  ibmCloudDedicatedHost = 'ibm-cloud--dedicated-host',
+  clusterIcon = 'web-services--cluster',
   /* Icons for special effect */
   size16 = '16',
   size20 = '20',
@@ -97,5 +106,73 @@ export enum Icons {
   stack2x = 'fa fa-stack-2x', // To stack regularly sized icon
   pulse = 'fa fa-pulse', // To have spinner rotate with 8 steps
   spin = 'fa fa-spin', //  To get any icon to rotate
-  inverse = 'fa fa-inverse' // To get an alternative icon color
+  inverse = 'fa fa-inverse', // To get an alternative icon color
+  notification = 'notification',
+  error = 'error--filled',
+  notificationOff = 'notification--off',
+  notificationNew = 'notification--new',
+  emptySearch = 'search',
+  dataViewAlt = 'data--view--alt',
+  dataCenter = 'data--center',
+  upgrade = 'upgrade',
+  warningAltFilled = 'warning--alt--filled',
+  help = 'help',
+  incidentReporter = 'incident-reporter',
+  ibmStreamSets = 'ibm--streamsets',
+  dataEnrichment = 'data-enrichment',
+  network1 = 'network--1',
+  chip = 'chip',
+  plug = 'plug',
+  vmdkDisk = 'vmdk-disk',
+  checkMarkOutline = 'checkmark--outline',
+  warningAlt = 'warning--alt',
+  arrowUpRight = 'arrow--up-right',
+  inProgress = 'in-progress',
+  arrowDown = 'arrow--down'
 }
+
+export enum IconSize {
+  size16 = '16',
+  size20 = '20',
+  size24 = '24',
+  size32 = '32'
+}
+
+export const ICON_TYPE = {
+  check: 'check',
+  copy: 'copy',
+  danger: 'danger',
+  deploy: 'deploy',
+  edit: 'edit',
+  error: 'error--filled',
+  infoCircle: 'info-circle',
+  notification: 'notification',
+  notificationOff: 'notification--off',
+  notificationNew: 'notification--new',
+  success: 'success',
+  warning: 'warning',
+  add: 'add',
+  emptySearch: 'emptySearch',
+  dataViewAlt: 'data--view--alt',
+  dataCenter: 'data--center',
+  upgrade: 'upgrade',
+  warningAltFilled: 'warning--alt--filled',
+  help: 'help',
+  incidentReporter: 'incident-reporter',
+  ibmStreamSets: 'ibm--streamsets',
+  dataEnrichment: 'data-enrichment',
+  network1: 'network--1',
+  chip: 'chip',
+  plug: 'plug',
+  vmdkDisk: 'vmdk-disk',
+  warningAlt: 'warning--alt',
+  checkMarkOutline: 'checkmark--outline',
+  arrowUpRight: ' arrow--up-right',
+  inProgress: 'in-progress',
+  arrowDown: 'arrow--down'
+} as const;
+
+export const EMPTY_STATE_IMAGE = {
+  default: 'assets/empty-state.png',
+  search: 'assets/empty-state-search.png'
+} as const;
