@@ -18,6 +18,7 @@
 
 #include "acconfig.h"
 
+#include <algorithm>
 #include <cctype>
 #include <fstream>
 #include <iomanip>
@@ -38,6 +39,7 @@
 #include <sys/mount.h>
 #endif
 
+#include "mgr/DaemonHealthMetric.h" // for enum daemon_metric
 #include "osd/PG.h"
 #include "osd/scrubber/scrub_machine.h"
 #include "osd/scrubber/pg_scrubber.h"
@@ -1473,18 +1475,17 @@ MOSDMap *OSDService::build_incremental_map_msg(epoch_t since, epoch_t to,
     // send what we have so far
     return m;
   }
-  // send something
+  // send something if we can
   bufferlist bl;
   if (get_inc_map_bl(m->newest_map, bl)) {
     m->incremental_maps[m->newest_map] = std::move(bl);
-  } else {
-    derr << __func__ << " unable to load latest map " << m->newest_map << dendl;
-    if (!get_map_bl(m->newest_map, bl)) {
-      derr << __func__ << " unable to load latest full map " << m->newest_map
-	   << dendl;
-      ceph_abort();
-    }
+  } else if (get_map_bl(m->newest_map, bl)) {
     m->maps[m->newest_map] = std::move(bl);
+  } else {
+    derr << __func__ << " unable to load latest map " << m->newest_map
+	 << ", sending empty map message (peer will drop or re-request from mon)"
+	 << dendl;
+
   }
   return m;
 }
@@ -1766,7 +1767,8 @@ void OSDService::queue_for_snap_trim(PG *pg, uint64_t cost_per_object)
       return cost_per_object * cct->_conf->osd_pg_max_concurrent_snap_trims;
     } else {
       /* We retain this legacy behavior for WeightedPriorityQueue.
-       * This branch should be removed after Squid.
+       * This branch should be removed after Umbrella (after consulting
+       * dev team)
        */
       return cct->_conf->osd_snap_trim_cost;
     }
@@ -4194,7 +4196,7 @@ void OSD::final_init()
 
   r = admin_socket->register_command("compact",
 				     asok_hook,
-				     "Commpact object store's omap."
+				     "Compact object store's omap."
                                      " WARNING: Compaction probably slows your requests");
   ceph_assert(r == 0);
 
@@ -11738,7 +11740,9 @@ void OSDBenchTest::perform_write_test()
     std::string nm;
     unsigned offset = 0;
     bufferptr bp(bsize);
-    memset(bp.c_str(), random_gen() & 0xff, bp.length());
+    std::generate_n(bp.c_str(), bp.length(), [&random_gen]() {
+        return static_cast<char>(random_gen() & 0xff);
+    });
     bl.push_back(std::move(bp));
     bl.rebuild_page_aligned();
     if (onum && osize) {

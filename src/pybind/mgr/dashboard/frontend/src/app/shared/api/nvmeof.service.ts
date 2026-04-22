@@ -186,18 +186,17 @@ export class NvmeofService {
     return this.http.get(`${API_PATH}/subsystem/${subsystemNQN}?gw_group=${group}`);
   }
 
-  createSubsystem(request: {
-    nqn: string;
-    enable_ha: boolean;
-    gw_group: string;
-    dhchap_key: string;
-  }) {
+  createSubsystem(request: { nqn: string; gw_group: string; dhchap_key: string }) {
     return this.http.post(`${API_PATH}/subsystem`, request, { observe: 'response' });
   }
 
   deleteSubsystem(subsystemNQN: string, group: string) {
-    return this.http.delete(`${API_PATH}/subsystem/${subsystemNQN}?gw_group=${group}`, {
-      observe: 'response'
+    return this.http.delete(`${API_PATH}/subsystem/${subsystemNQN}`, {
+      observe: 'response',
+      params: {
+        gw_group: group,
+        force: 'true'
+      }
     });
   }
 

@@ -2783,10 +2783,6 @@ void RGWGetObj::execute(optional_yield y)
     goto done_err;
   total_len = (ofs <= end ? end + 1 - ofs : 0);
 
-  ofs_x = ofs;
-  end_x = end;
-  filter->fixup_range(ofs_x, end_x);
-
   /* Check whether the object has expired. Swift API documentation
    * stands that we should return 404 Not Found in such case. */
   if (need_object_expiration() && s->object->is_expired()) {
@@ -2804,11 +2800,14 @@ void RGWGetObj::execute(optional_yield y)
                                     attr_iter != attrs.end() ? &(attr_iter->second) : nullptr);
   if (decrypt != nullptr) {
     filter = decrypt.get();
-    filter->fixup_range(ofs_x, end_x);
   }
   if (op_ret < 0) {
     goto done_err;
   }
+
+  ofs_x = ofs;
+  end_x = end;
+  filter->fixup_range(ofs_x, end_x);
 
 
   if (!get_data || ofs > end) {
@@ -5946,7 +5945,7 @@ public:
     }
 
     bool src_encrypted = s->src_object->get_attrs().count(RGW_ATTR_CRYPT_MODE);
-    if (need_decompress && !src_encrypted) {
+    if (need_decompress) {
       obj_size = decompress_info.orig_size;
       s->src_object->set_obj_size(obj_size);
       static constexpr bool partial_content = false;
@@ -7432,9 +7431,9 @@ void RGWCompleteMultipart::execute(optional_yield y)
      from deleting the parts*/
   int max_lock_secs_mp =
     s->cct->_conf.get_val<int64_t>("rgw_mp_lock_max_time");
-  utime_t dur(max_lock_secs_mp, 0);
+  const ceph::timespan dur = std::chrono::seconds(max_lock_secs_mp);
 
-  serializer = meta_obj->get_serializer(this, "RGWCompleteMultipart");
+  serializer = meta_obj->get_serializer(this, y, "RGWCompleteMultipart");
   op_ret = serializer->try_lock(this, dur, y);
   if (op_ret < 0) {
     ldpp_dout(this, 0) << "failed to acquire lock" << dendl;
@@ -7549,6 +7548,13 @@ void RGWCompleteMultipart::execute(optional_yield y)
   // no etag and size before completion
   op_ret = rgw::bucketlogging::log_record(driver, rgw::bucketlogging::LoggingType::Journal, s->object.get(), s, canonical_name(), "", 0, this, y, false, false);
   if (op_ret < 0) {
+    return;
+  }
+
+  if (!serializer->is_locked()) {
+    // lock renewal failed, it's not safe to commit the head object
+    op_ret = -ERR_INTERNAL_ERROR;
+    s->err.message = "This multipart completion is already in progress";
     return;
   }
 
@@ -7716,8 +7722,8 @@ void RGWAbortMultipart::execute(optional_yield y)
 
   int max_lock_secs_mp =
     s->cct->_conf.get_val<int64_t>("rgw_mp_lock_max_time");
-  utime_t dur(max_lock_secs_mp, 0);
-  auto serializer = meta_obj->get_serializer(this, "RGWCompleteMultipart");
+  const ceph::timespan dur = std::chrono::seconds(max_lock_secs_mp);
+  auto serializer = meta_obj->get_serializer(this, y, "RGWCompleteMultipart");
   op_ret = serializer->try_lock(this, dur, y);
   if (op_ret < 0) {
     if (op_ret == -ENOENT) {

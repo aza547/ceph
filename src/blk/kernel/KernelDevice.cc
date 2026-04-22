@@ -294,12 +294,6 @@ int KernelDevice::open(const string& p)
       support_discard = blkdev_buffered.support_discard();
       optimal_io_size = blkdev_buffered.get_optimal_io_size();
       this->devname = devname;
-      // check if any extended block device plugin recognizes this device
-      // detect_vdo has moved into the VDO plugin
-      int rc = extblkdev::detect_device(cct, devname, ebd_impl);
-      if (rc != 0) {
-	dout(20) << __func__ << " no plugin volume maps to " << devname << dendl;
-      }
     }
   }
 
@@ -473,6 +467,22 @@ int KernelDevice::get_ebd_state(ExtBlkDevState &state) const
   // VDO specific get_thin_utilization has moved into VDO plugin
   if (ebd_impl) {
     return ebd_impl->get_state(state);
+  }
+  return -ENOENT;
+}
+
+int KernelDevice::detect_ebd(std::string& id)
+{
+  // check if any extended block device plugin recognizes this device
+  // detect_vdo has moved into the VDO plugin
+  if (!ebd_impl) {
+    int rc = extblkdev::detect_device(cct, devname, ebd_impl);
+    if (rc != 0) {
+      dout(20) << __func__ << " no plugin volume maps to " << devname << dendl;
+    }
+  }
+  if (ebd_impl) {
+    return ebd_impl->get_plugin_id(id);
   }
   return -ENOENT;
 }

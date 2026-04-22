@@ -110,7 +110,7 @@ filling up the file system used by the Monitor. It might also indicate that the
 Monitor database is too large (see ``MON_DISK_BIG`` below).  Another common
 scenario is that Ceph logging subsystem levels have been raised for
 troubleshooting purposes without subsequent return to default levels.  Ongoing
-verbose logging can easily fill up the files system containing ``/var/log``. If
+verbose logging can easily fill up the file system containing ``/var/log``. If
 you trim logs that are currently open, remember to restart or instruct your
 syslog or other daemon to re-open the log file. Another common dynamic is
 that users or processes have written a large amount of data to ``/tmp``
@@ -200,7 +200,7 @@ To disable the grace period entirely (immediate reporting), set the value to 0:
    ceph config set mon mon_netsplit_grace_period 0
 
 MON_COLOCATED
-____________
+_____________
 
 Two or more Monitors are located on the same node. This health check is 
 raised when multiple Monitors share the same IP address. This check is by 
@@ -356,6 +356,39 @@ think you have encountered a bug.
 However, if you believe the error is transient, you may restart your Manager
 daemon(s) or use ``ceph mgr fail`` on the active daemon in order to force
 failover to another daemon.
+
+**Module failed to initialize**
+
+If the ``ceph health detail`` looks something like this, it means that some
+modules took too long to initialize after a Manager failover, and are unable to process
+commands:
+
+.. code-block:: console
+
+   HEALTH_ERR 4 mgr modules have failed
+   [ERR] MGR_MODULE_ERROR: 14 mgr modules have failed
+       Module 'rbd_support' has failed: Module failed to initialize.
+       Module 'status' has failed: Module failed to initialize.
+       Module 'telemetry' has failed: Module failed to initialize.
+       Module 'volumes' has failed: Module failed to initialize.
+
+
+You can also see these modules listed under ``pending_modules``
+in the output of the following command:
+
+.. prompt:: bash $
+
+   ceph tell mgr mgr_status
+
+To troubleshoot, you may run ``ceph mgr fail`` to reboot
+module initialization.
+
+Note that the health error may clear on its own since modules
+will continue to initialize in the background.
+
+If the modules are still failing to initialize, please file a bug
+report under the `"mgr" project <https://tracker.ceph.com/projects/mgr>`_
+for further assistance.
 
 OSDs
 ----

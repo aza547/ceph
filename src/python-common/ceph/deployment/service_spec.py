@@ -38,6 +38,7 @@ from ceph.deployment.utils import unwrap_ipv6, valid_addr, verify_non_negative_i
 from ceph.deployment.utils import verify_positive_int, verify_non_negative_number
 from ceph.deployment.utils import verify_boolean, verify_enum, verify_int
 from ceph.deployment.utils import parse_combined_pem_file
+from ceph.cephadm.d3n_types import D3NCacheSpec, D3NCacheError
 from ceph.utils import is_hex
 from ceph.smb import constants as smbconst
 from ceph.smb import network as smbnet
@@ -92,6 +93,19 @@ def handle_type_error(method: FuncT) -> FuncT:
             error_msg = '{}: {}'.format(cls.__name__, e)
             raise SpecValidationError(error_msg)
     return cast(FuncT, inner)
+
+
+class YamlLiteralString(str):
+    """
+    Class used as marker for yaml representer to properly format
+    multi-line strings for yaml export
+    """
+    @staticmethod
+    def represent_as_literal(dumper: 'yaml.SafeDumper', data: str) -> Any:
+        return dumper.represent_scalar('tag:yaml.org,2002:str', data, style='|')
+
+
+yaml.add_representer(YamlLiteralString, YamlLiteralString.represent_as_literal)
 
 
 class HostPlacementSpec(NamedTuple):
@@ -936,6 +950,14 @@ class ServiceSpec(object):
         sub_cls: Any = cls._cls(service_type)
         return object.__new__(sub_cls)
 
+    def __getnewargs__(self) -> tuple[str]:
+        """
+        Pickle will pass the return of this function to __new__ upon
+        unpickle.  We need to ensure it gets service_type in order
+        to get the right subtype.
+        """
+        return (self.service_type,)
+
     def __init__(self,
                  service_type: str,
                  service_id: Optional[str] = None,
@@ -1313,7 +1335,15 @@ class ServiceSpec(object):
 
     @staticmethod
     def yaml_representer(dumper: 'yaml.SafeDumper', data: 'ServiceSpec') -> Any:
-        return dumper.represent_dict(cast(Mapping, data.to_json().items()))
+        json_data = data.to_json()
+        spec = json_data.get('spec', {})
+
+        # Marking multi-line strings with the YamlLiteralString class
+        for key, value in spec.items():
+            if isinstance(value, str) and '\n' in value:
+                spec[key] = YamlLiteralString(value)
+
+        return dumper.represent_dict(cast(Mapping, json_data.items()))
 
 
 yaml.add_representer(ServiceSpec, ServiceSpec.yaml_representer)
@@ -1382,9 +1412,7 @@ class NFSServiceSpec(ServiceSpec):
         self.tls_min_version = tls_min_version
 
     def get_port_start(self) -> List[int]:
-        if self.port:
-            return [self.port]
-        return []
+        return [self.port or 2049, self.monitoring_port or 9587]
 
     def rados_config_name(self):
         # type: () -> str
@@ -1432,6 +1460,16 @@ class RGWSpec(ServiceSpec):
             rgw_frontend_port: 1234
             rgw_frontend_type: beast
             rgw_frontend_ssl_certificate: ...
+            # Optional: enable D3N (L1 datacache) for RGW
+            d3n_cache:
+                filesystem: xfs          # default: xfs
+                size: 10G                # required; int bytes or string with K/M/G/T/P
+                devices:                 # required; per-host list of devices
+                    host1:
+                      - /dev/nvme0n1
+                    host2:
+                      - /dev/nvme1n1
+                      - /dev/nvme2n1
 
     See also: :ref:`orchestrator-cli-service-spec`
     """
@@ -1482,6 +1520,7 @@ class RGWSpec(ServiceSpec):
                  wildcard_enabled: Optional[bool] = False,
                  rgw_exit_timeout_secs: int = 120,
                  qat: Optional[Dict[str, str]] = None,
+                 d3n_cache: Optional[Dict[str, Any]] = None,
                  ):
         assert service_type == 'rgw', service_type
 
@@ -1550,6 +1589,7 @@ class RGWSpec(ServiceSpec):
         self.rgw_exit_timeout_secs = rgw_exit_timeout_secs
 
         self.qat = qat or {}
+        self.d3n_cache = d3n_cache or {}
 
     def get_port_start(self) -> List[int]:
         ports = self.get_port()
@@ -1633,6 +1673,12 @@ class RGWSpec(ServiceSpec):
                 raise SpecValidationError(
                     f"Invalid compression mode {compression}. Only 'sw' and 'hw' are allowed"
                     )
+
+        if self.d3n_cache:
+            try:
+                D3NCacheSpec.from_json(self.d3n_cache)
+            except D3NCacheError as e:
+                raise SpecValidationError(str(e))
 
 
 yaml.add_representer(RGWSpec, ServiceSpec.yaml_representer)
@@ -1741,6 +1787,7 @@ class NvmeofServiceSpec(ServiceSpec):
                  monitor_timeout: Optional[float] = 1.0,
                  enable_monitor_client: bool = True,
                  monitor_client_log_file_dir: Optional[str] = '',
+                 kmip_cert_dir: Optional[str] = './certs/kmip/{server_name}',
                  placement: Optional[PlacementSpec] = None,
                  unmanaged: bool = False,
                  preview_only: bool = False,
@@ -1764,8 +1811,8 @@ class NvmeofServiceSpec(ServiceSpec):
                                                 extra_entrypoint_args=extra_entrypoint_args,
                                                 custom_configs=custom_configs)
 
-        #: RADOS pool where ceph-nvmeof config data is stored.
-        self.pool = pool
+        #: RADOS pool where ceph-nvmeof config data is stored (use '.nvmeof' as default).
+        self.pool = pool or '.nvmeof'
         #: ``addr`` address of the nvmeof gateway
         self.addr = addr
         #: ``addr_map`` per node address map of the nvmeof gateways
@@ -1778,7 +1825,7 @@ class NvmeofServiceSpec(ServiceSpec):
         self.group = group or ''
         #: ``enable_auth`` enables user authentication on nvmeof gateway
         self.enable_auth = enable_auth
-        self.ssl = enable_auth  # to force enabling ssl field when auth is enabled
+        self.ssl = ssl or enable_auth  # to force enabling ssl field when auth is enabled
         #: ``state_update_notify`` enables automatic update from OMAP in nvmeof gateway
         self.state_update_notify = state_update_notify
         #: ``state_update_interval_sec`` number of seconds to check for updates in OMAP
@@ -1964,6 +2011,8 @@ class NvmeofServiceSpec(ServiceSpec):
         self.enable_monitor_client = enable_monitor_client
         #: ``monitor_client_log_file_dir`` the monitor client log output file file directory
         self.monitor_client_log_file_dir = monitor_client_log_file_dir
+        #: ``kmip_cert_dir`` directory for KMIP servers keys and certificates
+        self.kmip_cert_dir = kmip_cert_dir
 
     def get_port_start(self) -> List[int]:
         return [self.port, 4420, self.discovery_port, self.prometheus_port]
@@ -3834,6 +3883,10 @@ class SMBSpec(ServiceSpec):
         remote_control_ssl_cert: Optional[str] = None,
         remote_control_ssl_key: Optional[str] = None,
         remote_control_ca_cert: Optional[str] = None,
+        # == keybridge ==
+        keybridge_kmip_ssl_cert: Optional[str] = None,
+        keybridge_kmip_ssl_key: Optional[str] = None,
+        keybridge_kmip_ca_cert: Optional[str] = None,
         # === cluster configs ===
         # ceph_cluster_configs - An optional list of extra ceph clusters
         # typically external to the current cluster that the smb services
@@ -3879,6 +3932,9 @@ class SMBSpec(ServiceSpec):
         self.remote_control_ssl_cert = remote_control_ssl_cert
         self.remote_control_ssl_key = remote_control_ssl_key
         self.remote_control_ca_cert = remote_control_ca_cert
+        self.keybridge_kmip_ssl_cert = keybridge_kmip_ssl_cert
+        self.keybridge_kmip_ssl_key = keybridge_kmip_ssl_key
+        self.keybridge_kmip_ca_cert = keybridge_kmip_ca_cert
         self.ceph_cluster_configs = SMBExternalCephCluster.convert_list(
             ceph_cluster_configs
         )

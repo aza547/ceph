@@ -3624,7 +3624,7 @@ int RGWPostObj_ObjStore_S3::get_encrypt_filter(
 }
 
 struct RestoreObjectRequest {
-  std::optional<uint64_t> days;
+  std::optional<int64_t> days;
 
   void decode_xml(XMLObj *obj) {
     RGWXMLDecoder::decode_xml("Days", days, obj);
@@ -3673,6 +3673,10 @@ int RGWRestoreObj_ObjStore_S3::get_params(optional_yield y)
   }
 
   if (request.days) {
+    if (request.days.value() < 1) {
+      s->err.message = "Days must be a positive integer";
+      return -EINVAL;
+    }
     expiry_days = request.days.value();
     ldpp_dout(this, 10) << "expiry_days=" << expiry_days << dendl;
   } else {
@@ -7257,7 +7261,7 @@ rgw::auth::s3::STSEngine::authenticate(
         real_clock::time_point now = real_clock::now();
         if (now >= *exp) {
           ldpp_dout(dpp, 0) << "ERROR: Token expired" << dendl;
-          return result_t::reject(-EPERM);
+          return result_t::reject(-ERR_EXPIRED_TOKEN);
         }
       } else {
         ldpp_dout(dpp, 0) << "ERROR: Invalid expiration: " << expiration << dendl;

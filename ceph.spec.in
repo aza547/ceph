@@ -437,7 +437,7 @@ BuildRequires:	lz4-devel >= 1.7
 %if 0%{with make_check}
 BuildRequires:	golang
 %if 0%{?fedora} || 0%{?rhel} || 0%{?openEuler}
-BuildRequires:	golang-github-prometheus
+BuildRequires:	/usr/bin/promtool
 BuildRequires:	libtool-ltdl-devel
 BuildRequires:	xmlsec1
 BuildRequires:	xmlsec1-devel
@@ -1785,6 +1785,7 @@ exit 0
 %{_bindir}/cephfs-data-scan
 %{_bindir}/cephfs-journal-tool
 %{_bindir}/cephfs-table-tool
+%{_bindir}/cephfs-tool
 %{_bindir}/crushdiff
 %{_bindir}/rados
 %{_bindir}/radosgw-admin

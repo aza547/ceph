@@ -81,6 +81,18 @@ options:
   default: false
   services:
   - rgw
+- name: rgw_dedup_split_obj_head
+  type: bool
+  level: advanced
+  desc: Enables the split-head functionality
+  long_desc: Dedup code can split head object into two objects -
+             one with attributes and no data and a new tail-object with only data.
+             The new-tail object will be deduped (unlike the head objects which
+             can't be deduplicated)
+  default: true
+  services:
+  - rgw
+  with_legacy: true
 - name: rgw_dedup_min_obj_size_for_dedup
   type: size
   level: advanced
@@ -578,6 +590,21 @@ options:
     is done to prevent concurrent completions on the same object with the same upload
     id.
   default: 10_min
+  min: 2_min
+  services:
+  - rgw
+- name: rgw_mp_lock_inject_delay
+  type: int
+  level: dev
+  desc: Injected delay after acquiring the multipart lock for renewal testing
+  default: 0
+  services:
+  - rgw
+- name: rgw_mp_lock_inject_renewal_error
+  type: int
+  level: dev
+  desc: Injected error code for multipart lock renewal testing
+  default: 0
   services:
   - rgw
 - name: rgw_script_uri

@@ -431,7 +431,8 @@ AlienStore::omap_iterate(CollectionRef ch,
                          const ghobject_t &oid,
                          ObjectStore::omap_iter_seek_t start_from,
                          omap_iterate_cb_t callback,
-                         uint32_t op_flags)
+                         uint32_t op_flags,
+			 omap_iterate_conf_t on_conflict)
 {
   logger().debug("{} with_start", __func__);
   assert(tp);
@@ -529,11 +530,7 @@ AlienStore::read_meta(const std::string& key)
     return tp->submit([key, this] {
       std::string value;
       int r = store->read_meta(key, &value);
-      if (r > 0) {
-        value.resize(r);
-        boost::algorithm::trim_right_if(value,
-          [] (unsigned char c) {return isspace(c);});
-      } else {
+      if (r < 0) {
         value.clear();
       }
       return std::make_pair(r, value);

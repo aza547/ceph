@@ -7,7 +7,7 @@
 #include <fcntl.h>
 
 #include "crimson/common/log.h"
-#include "crimson/common/errorator-loop.h"
+#include "crimson/common/errorator-utils.h"
 #include "crimson/os/seastore/logging.h"
 
 #include "include/buffer.h"
@@ -271,6 +271,24 @@ write_ertr::future<> EphemeralRBMDevice::write(
   ::memcpy(buf + offset, bptr.c_str(), bptr.length());
 
   return write_ertr::now();
+}
+
+read_ertr::future<> EphemeralRBMDevice::_readv(
+  uint64_t offset,
+  std::vector<bufferptr> ptrs) {
+  LOG_PREFIX(EphemeralRBMDevice::_readv);
+  ceph_assert(buf);
+  DEBUG(
+    "EphemeralRBMDevice: read offset {} {} buffers",
+    offset,
+    ptrs.size());
+
+  for (auto &ptr : ptrs) {
+    ptr.copy_in(0, ptr.length(), buf + offset);
+    offset += ptr.length();
+  }
+
+  return read_ertr::now();
 }
 
 read_ertr::future<> EphemeralRBMDevice::read(

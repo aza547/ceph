@@ -43,6 +43,7 @@ class GatewayInfo(NamedTuple):
     max_subsystems: Annotated[int, CliFlags.DROP]
     gateway_initialization_over: Annotated[bool, CliFlags.DROP]
     io_stats_enabled: Annotated[bool, CliFlags.DROP]
+    location: Annotated[str, CliFlags.DROP]
     spdk_version: Optional[str] = ""
 
 
@@ -84,6 +85,7 @@ class Subsystem(NamedTuple):
     has_dhchap_key: bool
     allow_any_host: bool
     created_without_key: bool = False
+    network_mask: Annotated[List[str], CliFieldTransformer(lambda v: "\n".join(v))] = []
 
 
 class SubsystemList(NamedTuple):
@@ -96,6 +98,19 @@ class SubsystemStatus(NamedTuple):
     status: int
     error_message: str
     nqn: str
+
+
+class KMIPServerEndpoint(NamedTuple):
+    subsystem_nqn: str
+    server_name: str
+    address: str
+    port: int
+
+
+class SubsystemListKMIPEndpoints(NamedTuple):
+    status: int
+    error_message: str
+    endpoints: Annotated[List[KMIPServerEndpoint], CliFlags.EXCLUSIVE_LIST]
 
 
 class Connection(NamedTuple):
@@ -156,6 +171,11 @@ class NamespaceCreation(NamedTuple):
     nsid: int
 
 
+class EncryptionEntry(NamedTuple):
+    format: str
+    key_id: str
+
+
 class Namespace(NamedTuple):
     bdev_name: str
     rbd_image_name: Annotated[str, CliHeader("RBD Image")]
@@ -177,6 +197,8 @@ class Namespace(NamedTuple):
     disable_auto_resize: Optional[bool]
     read_only: Optional[bool]
     location: Optional[str]
+    encryption_algorithm: Optional[str]
+    encryption_entries: Annotated[List[EncryptionEntry], CliFlags.EXCLUSIVE_LIST]
 
 
 class NamespaceList(NamedTuple):

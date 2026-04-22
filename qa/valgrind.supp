@@ -1,16 +1,12 @@
-
 {
    <allthefrees, so we can behave with tcmalloc>
    Memcheck:Free
    fun:free
-   ...
 }
 {
-   operator delete[] in Rados::shutdown
+   <allthefrees, so we can behave with tcmalloc>
    Memcheck:Free
-   fun:_ZdaPvm
-   ...
-   fun:_ZN8librados7v14_2_05Rados8shutdownEv
+   fun:_Zda*
 }
 {
    older boost mersenne twister uses uninitialized memory for randomness
@@ -727,6 +723,18 @@
 }
 
 {
+   glibc_2.34+_dlopen reachable leak
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   fun:malloc
+   obj:*/lib*/ld-linux-x86-64.so.2
+   ...
+   fun:_dl_open
+   ...
+   fun:dlopen@@GLIBC_2.34
+}
+
+{
   ethdev_init_log thing
   Memcheck:Leak
   match-leak-kinds: reachable
@@ -837,12 +845,6 @@
    ...
 }
 {
-   co_compose bug manifesting under Ubuntu only
-   Memcheck:Free
-   fun:_ZdaPvm
-   ...
-}
-{
    OpenSSL leak still reachable
    Memcheck:Leak
    match-leak-kinds: reachable
@@ -932,4 +934,14 @@
    fun:*ProtocolV2*
    ...
 }
-
+{
+   rocky10 still reachable rocksdb leak
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   fun:_Znam
+   fun:UnknownInlinedFun
+   fun:_GLOBAL__sub_I_error_handler.cc.lto_priv.0
+   fun:_sub_I_65535_0.0
+   fun:__libc_start_main@@GLIBC_2.34
+   fun:(below main)
+}

@@ -7253,6 +7253,7 @@ public:
 	 << byte_u_t(sum.statfs.available)
 	 << lowprecision_t(average_util)
 	 << ""
+   << sum.num_pgs
 	 << TextTable::endrow;
   }
 
@@ -8115,6 +8116,10 @@ unsigned OSDMap::get_device_class_flags(int id) const
 
 std::optional<std::string> OSDMap::pending_require_osd_release() const
 {
+  if (HAVE_FEATURE(get_up_osd_features(), SERVER_UMBRELLA) &&
+      require_osd_release < ceph_release_t::umbrella) {
+    return "umbrella";
+  }
   if (HAVE_FEATURE(get_up_osd_features(), SERVER_TENTACLE) &&
       require_osd_release < ceph_release_t::tentacle) {
     return "tentacle";
